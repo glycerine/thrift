@@ -181,7 +181,7 @@ AM_CONDITIONAL(WITH_ERLANG, [test "$have_erlang" = "yes"])
 AX_THRIFT_LIB(rust, [Rust], yes)
 if test "$with_rust" = "yes";  then
   AX_RUSTC_AND_RUST
-  if test "x$RUSTC" != "x" && test "x$RUSTC" != "x" && test "x$ANT" != "x" ; then
+  if test "x$RUSTC" != "x" && test "x$RUSTC" != "x" ; then
     have_rust="yes"
   fi
 fi
@@ -693,6 +693,11 @@ if test "$have_d" = "yes" ; then
   echo "Using D Compiler ............. : $DMD"
   echo "Building D libevent tests .... : $with_d_event_tests"
   echo "Building D SSL tests ......... : $with_d_ssl_tests"
+fi
+if test "$have_rust" = "yes" ; then
+  echo
+  echo "Using Rust Compiler ............. : $RUSTC"
+  echo "Using rust ...................... : $RUST"
 fi
 echo
 echo "If something is missing that you think should be present,"

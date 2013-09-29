@@ -63,7 +63,7 @@ AC_DEFUN([AX_RUSTC_AND_RUST],
                 IFS="$oIFS"
 
                 echo "Running \"$RUST configtest_ax_rustc_and_rust\"" >&AS_MESSAGE_LOG_FD
-                if $RUST configtest_ax_rustc_and_rust >&AS_MESSAGE_LOG_FD 2>&1 ; then
+                if $RUST configtest_ax_rustc_and_rust.rs >&AS_MESSAGE_LOG_FD 2>&1 ; then
                   success=yes
                   break 2
                 fi
