@@ -48,7 +48,7 @@ string to_upper_case(string name);
 string to_lower_case(string name);
 
 /**
- * Rust code generator. Based on c_glib, which uses glib for C typing.
+ * Rust code generator. Initially a clone of c_glib, which uses glib for C typing.
  *  This should become less glib and more Rust as we finish it out.
  */
 class t_rust_generator : public t_oop_generator {
@@ -62,10 +62,10 @@ class t_rust_generator : public t_oop_generator {
     (void) parsed_options;
     (void) option_string;
     /* set the output directory */
-    this->out_dir_base_ = "gen-c_glib";
+    this->out_dir_base_ = "gen-rust";
 
     /* set the namespace */
-    this->nspace = program_->get_namespace("c_glib");
+    this->nspace = program_->get_namespace("rust");
 
     if (this->nspace.empty()) {
       this->nspace = "";
@@ -3021,7 +3021,7 @@ string t_rust_generator::generate_new_array_from_type(t_type * ttype) {
 }
 
 
-// borrow these from c_glib for now.
+// borrow these from c_glib for now, to prevent link issues.
 #if 0
 /***************************************
  * UTILITY FUNCTIONS                   *

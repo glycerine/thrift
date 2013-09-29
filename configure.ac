@@ -576,6 +576,9 @@ AC_CONFIG_FILES([
   lib/c_glib/Makefile
   lib/c_glib/thrift_c_glib.pc
   lib/c_glib/test/Makefile
+  lib/rust/Makefile
+  lib/rust/thrift_rust.pc
+  lib/rust/test/Makefile
   lib/csharp/Makefile
   lib/d/Makefile
   lib/d/test/Makefile
@@ -628,7 +631,7 @@ echo "Building Haskell Library ..... : $have_haskell"
 echo "Building Perl Library ........ : $have_perl"
 echo "Building PHP Library ......... : $have_php"
 echo "Building Erlang Library ...... : $have_erlang"
-echo "Building Rust Library ...... : $have_erlang"
+echo "Building Rust Library ......   : $have_rust"
 echo "Building Go Library .......... : $have_go"
 echo "Building D Library ........... : $have_d"
 
