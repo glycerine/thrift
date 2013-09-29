@@ -43,7 +43,7 @@ using std::vector;
 static const string endl = "\n";  // avoid ostream << std::endl flushes
 
 /**
- * C++ code generator. This is legitimacy incarnate.
+ * Rust code generator. Start from C++ code generator and adapt.
  *
  */
 class t_rust_generator : public t_oop_generator {
@@ -321,7 +321,7 @@ class t_rust_generator : public t_oop_generator {
   // TODO: The code really should be cleaned up so that helper methods for
   // writing to the output files are separate from the generator classes
   // themselves.
-  friend class ProcessorGenerator;
+  friend class RustProcessorGenerator;
 };
 
 /**
@@ -2681,9 +2681,9 @@ void t_rust_generator::generate_service_client(t_service* tservice, string style
   }
 }
 
-class ProcessorGenerator {
+class RustProcessorGenerator {
  public:
-  ProcessorGenerator(t_rust_generator* generator, t_service* service,
+  RustProcessorGenerator(t_rust_generator* generator, t_service* service,
                      const string& style);
 
   void run() {
@@ -2749,7 +2749,7 @@ class ProcessorGenerator {
   string extends_;
 };
 
-ProcessorGenerator::ProcessorGenerator(t_rust_generator* generator,
+RustProcessorGenerator::RustProcessorGenerator(t_rust_generator* generator,
                                        t_service* service,
                                        const string& style)
   : generator_(generator),
@@ -2799,7 +2799,7 @@ ProcessorGenerator::ProcessorGenerator(t_rust_generator* generator,
   }
 }
 
-void ProcessorGenerator::generate_class_definition() {
+void RustProcessorGenerator::generate_class_definition() {
   // Generate the dispatch methods
   vector<t_function*> functions = service_->get_functions();
   vector<t_function*>::iterator f_iter;
@@ -2982,7 +2982,7 @@ void ProcessorGenerator::generate_class_definition() {
   }
 }
 
-void ProcessorGenerator::generate_dispatch_call(bool template_protocol) {
+void RustProcessorGenerator::generate_dispatch_call(bool template_protocol) {
   string protocol = "::apache::thrift::protocol::TProtocol";
   string function_suffix;
   if (template_protocol) {
@@ -3067,7 +3067,7 @@ void ProcessorGenerator::generate_dispatch_call(bool template_protocol) {
     endl;
 }
 
-void ProcessorGenerator::generate_process_functions() {
+void RustProcessorGenerator::generate_process_functions() {
   vector<t_function*> functions = service_->get_functions();
   vector<t_function*>::iterator f_iter;
   for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
@@ -3080,7 +3080,7 @@ void ProcessorGenerator::generate_process_functions() {
   }
 }
 
-void ProcessorGenerator::generate_factory() {
+void RustProcessorGenerator::generate_factory() {
   string if_factory_name = if_name_ + "Factory";
 
   // Generate the factory class definition
@@ -3154,7 +3154,7 @@ void ProcessorGenerator::generate_factory() {
  */
 void t_rust_generator::generate_service_processor(t_service* tservice,
                                                  string style) {
-  ProcessorGenerator generator(this, tservice, style);
+  RustProcessorGenerator generator(this, tservice, style);
   generator.run();
 }
 
