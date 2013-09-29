@@ -114,7 +114,6 @@ class t_rust_generator : public t_oop_generator {
 
   /* file streams */
   ofstream f_types_impl_;
-  ofstream f_header_;
   ofstream f_service_;
 
   /* namespace variables */
@@ -369,49 +368,40 @@ void t_rust_generator::generate_service (t_service *tservice) {
   string filename = this->nspace_lc + to_lower_case(svcname_u);
 
   // make output files
-  string f_header_name = get_out_dir() + filename + ".h";
-  f_header_.open(f_header_name.c_str());
+
+  // create the service implementation
+  string f_service_name = get_out_dir() + filename + ".rs";
+  f_service_.open(f_service_name.c_str());
 
   string program_name_u = initial_caps_to_underscores(program_name_);
   string program_name_lc = to_lower_case(program_name_u);
-
-  // add header file boilerplate
-  f_header_ <<
-    autogen_comment();
-
-  // add an inclusion guard
-  f_header_ <<
-    "#ifndef " << svcname_uc << "_H" << endl <<
-    "#define " << svcname_uc << "_H" << endl <<
-    endl;
-
-  // add standard includes
-  f_header_ <<
-    "#include \"" << this->nspace_lc << program_name_lc << "_types.h\"" << endl;
-
-  // if we are inheriting from another service, include its header
-  t_service *extends_service = tservice->get_extends();
-  if (extends_service != NULL) {
-    f_header_ <<
-      "#include \"" << this->nspace_lc << to_lower_case(initial_caps_to_underscores(extends_service->get_name())) << ".h\"" << endl;
-  }
-  f_header_ << endl;
-
-  // create the service implementation
-  string f_service_name = get_out_dir() + filename + ".c";
-  f_service_.open(f_service_name.c_str());
 
   // add the boilerplace header
   f_service_ <<
     autogen_comment();
 
+  // add standard includes
+  f_service_ <<
+    "mod " << this->nspace_lc << program_name_lc << "_types;" << endl;
+
   // include the headers
+  /*
   f_service_ <<
     "#include <string.h>" << endl <<
     "#include <thrift/c_glib/thrift.h>" << endl <<
     "#include <thrift/c_glib/thrift_application_exception.h>" << endl <<
     "#include \"" << filename << ".h\"" << endl <<
     endl;
+  */
+
+  // if we are inheriting from another service, include its header
+  t_service *extends_service = tservice->get_extends();
+  if (extends_service != NULL) {
+    f_service_ <<
+      "mod " << this->nspace_lc << to_lower_case(initial_caps_to_underscores(extends_service->get_name())) << ";" << endl;
+  }
+  f_service_ << endl;
+
 
   // generate the client objects
   generate_service_client (tservice);
@@ -419,13 +409,8 @@ void t_rust_generator::generate_service (t_service *tservice) {
   // generate the server objects
   generate_service_server (tservice);
 
-  // end the header inclusion guard
-  f_header_ <<
-    "#endif /* " << svcname_uc << "_H */" << endl;
-
   // close the files
   f_service_.close();
-  f_header_.close();
 }
 
 /**
@@ -1017,20 +1002,9 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
   string service_name_lc = to_lower_case(initial_caps_to_underscores(service_name_));
   string service_name_uc = to_upper_case(service_name_lc);
 
-  // Generate the client interface dummy object in the header.
-  f_header_ <<
-    "/* " << service_name_ << " service interface */" << endl <<
-    "typedef struct _" << this->nspace << service_name_ << "If " <<
-        this->nspace << service_name_ << "If; " <<
-        " /* dummy object */" << endl <<
-    endl;
-
   // Generate the client interface object in the header.
-  f_header_ <<
-    "struct _" << this->nspace << service_name_ << "IfInterface" << endl <<
-    "{" << endl <<
-    "  GTypeInterface parent;" << endl <<
-  endl;
+  f_service_ /*was f_header_ */ <<
+    "trait " << this->nspace << service_name_ << " {" << endl;
 
   /* write out the functions for this interface */
   indent_up();
@@ -1041,30 +1015,24 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
     string funname = initial_caps_to_underscores((*f_iter)->get_name());
     t_type *ttype = (*f_iter)->get_returntype();
     t_struct *arglist = (*f_iter)->get_arglist();
-    t_struct *xlist = (*f_iter)->get_xceptions();
+    //jea unused now: t_struct *xlist = (*f_iter)->get_xceptions();
     bool has_return = !ttype->is_void();
     bool has_args = arglist->get_members().size() == 0;
-    bool has_xceptions = xlist->get_members().size() == 0;
+    //jea unused now: bool has_xceptions = xlist->get_members().size() == 0;
 
-    string params = "(" + this->nspace + service_name_ + "If *iface"
-                    + (has_return ? ", " + type_name (ttype) + "* _return" : "")
-                    + (has_args ? "" : (", " + argument_list (arglist)))
-                    + (has_xceptions ? "" : (", " + xception_list (xlist)))
-                    + ", GError **error)";
+    string params = "(&mut self"
+      + (has_args ? "" : (", " + argument_list (arglist)))
+      + (has_return ? ") -> " + type_name (ttype) + ";" : ") ");
                     
-    indent(f_header_) << "gboolean (*" << funname << ") " << params << ";" <<
-                          endl;
+    indent(f_service_ /*was f_header_ */) << "fn " << funname << " " << params << endl;
+
   }
   indent_down();
 
-  f_header_ <<
-    "};" << endl <<
-    "typedef struct _" << this->nspace << service_name_ << "IfInterface " <<
-        this->nspace << service_name_ << "IfInterface;" << endl <<
-    endl;
+  f_service_  <<  "}\n" << endl;
 
   // generate all the interface boilerplate
-  f_header_ <<
+  f_service_ /*was f_header_ */ <<
     "GType " << this->nspace_lc << service_name_lc <<
         "_if_get_type (void);" << endl <<
     "#define " << this->nspace_uc << "TYPE_" << service_name_uc << "_IF " <<
@@ -1100,13 +1068,13 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
                     + (has_xceptions ? "" : (", " + xception_list (xlist)))
                     + ", GError **error)";
 
-    f_header_ << "gboolean " << this->nspace_lc << service_name_lc <<
+    f_service_ /*was f_header_ */ << "gboolean " << this->nspace_lc << service_name_lc <<
                  "_if_" << funname << " " << params << ";" << endl;
   }
-  f_header_ << endl;
+  f_service_ /*was f_header_ */ << endl;
 
   // Generate the client object instance definition in the header.
-  f_header_ <<
+  f_service_ /*was f_header_ */ <<
     "/* " << service_name_ << " service client */" << endl <<
     "struct _" << this->nspace << service_name_ << "Client" << endl <<
     "{" << endl <<
@@ -1120,7 +1088,7 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
     endl;
 
   // Generate the class definition in the header.
-  f_header_ <<
+  f_service_ /*was f_header_ */ <<
     "struct _" << this->nspace << service_name_ << "ClientClass" << endl <<
     "{" << endl <<
     "  GObjectClass parent;" << endl <<
@@ -1130,7 +1098,7 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
     endl;
 
   // Create all the GObject boilerplate
-  f_header_ <<
+  f_service_ /*was f_header_ */ <<
     "GType " << this->nspace_lc << service_name_lc << 
         "_client_get_type (void);" << endl <<
     "#define " << this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT " <<
@@ -1166,13 +1134,13 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
                                  + funname,
                                  (*f_iter)->get_arglist(),
                                  (*f_iter)->get_xceptions());
-    indent(f_header_) << function_signature (&service_function) << ";" << endl;
+    indent(f_service_ /*was f_header_ */) << function_signature (&service_function) << ";" << endl;
 
     t_function send_function (g_type_void,
                               service_name_lc + string ("_client_send_")
                               + funname,
                               (*f_iter)->get_arglist());
-    indent(f_header_) << function_signature (&send_function) << ";" << endl;
+    indent(f_service_ /*was f_header_ */) << function_signature (&send_function) << ";" << endl;
 
     // implement recv if not a oneway service
     if (!(*f_iter)->is_oneway()) {
@@ -1182,15 +1150,15 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
                                 + funname,
                                 &noargs,
                                 (*f_iter)->get_xceptions());
-      indent(f_header_) << function_signature (&recv_function) << ";" << endl;
+      indent(f_service_ /*was f_header_ */) << function_signature (&recv_function) << ";" << endl;
     }
   }
 
   /* write out the get/set function prototypes */
-  f_header_ << "void " + service_name_lc + "_client_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec);" << endl;
-  f_header_ << "void " + service_name_lc + "_client_get_property (GObject *object, guint property_id, GValue *value, GParamSpec *pspec);" << endl;
+  f_service_ /*was f_header_ */ << "void " + service_name_lc + "_client_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec);" << endl;
+  f_service_ /*was f_header_ */ << "void " + service_name_lc + "_client_get_property (GObject *object, guint property_id, GValue *value, GParamSpec *pspec);" << endl;
 
-  f_header_ << endl;
+  f_service_ /*was f_header_ */ << endl;
   // end of header code
 
   // Generate interface method implementations
