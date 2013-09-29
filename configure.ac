@@ -180,19 +180,12 @@ AM_CONDITIONAL(WITH_ERLANG, [test "$have_erlang" = "yes"])
 
 AX_THRIFT_LIB(rust, [Rust], yes)
 if test "$with_rust" = "yes";  then
-  AC_RUST_PATH_RUST
-  AC_RUST_PATH_RUSTC
-  if test -n "$RUSTC" ; then
-    AC_RUST_SUBST_LIB_DIR
-    # Install into the detected Rust directory instead of $libdir/rust/lib
-    RUST_INSTALL_LIB_DIR="$RUST_LIB_DIR"
-    AC_RUST_SUBST_INSTALL_LIB_SUBDIR(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
-  fi
-  if test -n "$RUST" -a -n "$RUSTC" ; then
+  AX_RUSTC_AND_RUST
+  if test "x$RUSTC" != "x" && test "x$RUSTC" != "x" && test "x$ANT" != "x" ; then
     have_rust="yes"
   fi
 fi
-AM_CONDITIONAL(WITH_RUST, [test "$have_rust" = "yes"])
+AM_CONDITIONAL([WITH_RUST], [test "$have_rust" = "yes"])
 
 
 AX_THRIFT_LIB(python, [Python], yes)
