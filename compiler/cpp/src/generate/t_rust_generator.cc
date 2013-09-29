@@ -677,19 +677,16 @@ string t_rust_generator::constant_value(string name, t_type *type, t_const_value
 string t_rust_generator::function_signature(t_function* tfunction) {
   t_type* ttype = tfunction->get_returntype();
   t_struct* arglist = tfunction->get_arglist();
-  t_struct* xlist = tfunction->get_xceptions();
+  //jea unused: t_struct* xlist = tfunction->get_xceptions();
   string fname = initial_caps_to_underscores(tfunction->get_name());
 
   bool has_return = !ttype->is_void();
   bool has_args = arglist->get_members().size() == 0;
-  bool has_xceptions = xlist->get_members().size() == 0;
+  //jea unused:  bool has_xceptions = xlist->get_members().size() == 0;
   return
-    "gboolean " + this->nspace_lc + fname + " (" + this->nspace
-    + service_name_ + "If * iface"
-    + (has_return ? ", " + type_name(ttype) + "* _return" : "")
-    + (has_args ? "" : (", " + argument_list (arglist))) 
-    + (has_xceptions ? "" : (", " + xception_list (xlist)))
-    + ", GError ** error)";
+    "fn " + this->nspace_lc + fname + " (&mut self"
+    + (has_args ? ")" : (", " + argument_list (arglist) + ")")) 
+    + (has_return ? " -> " + type_name(ttype) : "");
 }
 
 /**
@@ -1031,6 +1028,7 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
 
   f_service_  <<  "}\n" << endl;
 
+#if 0 //jea
   // generate all the interface boilerplate
   f_service_ /*was f_header_ */ <<
     "GType " << this->nspace_lc << service_name_lc <<
@@ -1073,13 +1071,14 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
   }
   f_service_ /*was f_header_ */ << endl;
 
+#endif // jea
+
+
   // Generate the client object instance definition in the header.
   f_service_ /*was f_header_ */ <<
     "/* " << service_name_ << " service client */" << endl <<
-    "struct _" << this->nspace << service_name_ << "Client" << endl <<
+    "struct " << this->nspace << service_name_ << "Client" << endl <<
     "{" << endl <<
-    "  GObject parent;" << endl <<
-    endl <<
     "  ThriftProtocol *input_protocol;" << endl <<
     "  ThriftProtocol *output_protocol;" << endl <<
     "};" << endl <<
@@ -1089,14 +1088,12 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
 
   // Generate the class definition in the header.
   f_service_ /*was f_header_ */ <<
-    "struct _" << this->nspace << service_name_ << "ClientClass" << endl <<
+    "trait " << this->nspace << service_name_ << "ClientClass" << endl <<
     "{" << endl <<
-    "  GObjectClass parent;" << endl <<
-    "};" << endl <<
-    "typedef struct _" << this->nspace << service_name_ << "ClientClass " <<
-      this->nspace << service_name_ << "ClientClass;" << endl <<
-    endl;
+    endl <<
+    "}" << endl;
 
+#if 0 //jea
   // Create all the GObject boilerplate
   f_service_ /*was f_header_ */ <<
     "GType " << this->nspace_lc << service_name_lc << 
@@ -1123,6 +1120,7 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
         this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT, " <<
         this->nspace << service_name_ << "ClientClass))" << endl << 
     endl;
+#endif //jea
 
   /* write out the function prototypes */
   for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
@@ -1155,8 +1153,8 @@ void t_rust_generator::generate_service_client(t_service *tservice) {
   }
 
   /* write out the get/set function prototypes */
-  f_service_ /*was f_header_ */ << "void " + service_name_lc + "_client_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec);" << endl;
-  f_service_ /*was f_header_ */ << "void " + service_name_lc + "_client_get_property (GObject *object, guint property_id, GValue *value, GParamSpec *pspec);" << endl;
+  f_service_ /*was f_header_ */ << "fn " + service_name_lc + "_client_set_property (&mut self, guint property_id, const GValue *value, GParamSpec *pspec);" << endl;
+  f_service_ /*was f_header_ */ << "fn " + service_name_lc + "_client_get_property (&mut self, guint property_id, GValue *value, GParamSpec *pspec);" << endl;
 
   f_service_ /*was f_header_ */ << endl;
   // end of header code
@@ -1646,12 +1644,9 @@ void t_rust_generator::generate_object(t_struct *tstruct) {
     }
   }
 
-  // close the structure definition and create a typedef
+  // close the structure definition
   f_types_impl_ <<
-    "};" << endl <<
-    "typedef struct _" << this->nspace << name << " " << 
-        this->nspace << name << ";" << endl <<
-      endl;
+    "}" << endl;
 
   // write the class definition
   f_types_impl_ <<
