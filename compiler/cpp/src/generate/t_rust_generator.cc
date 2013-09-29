@@ -113,7 +113,6 @@ class t_rust_generator : public t_oop_generator {
  private:
 
   /* file streams */
-  ofstream f_types_;
   ofstream f_types_impl_;
   ofstream f_header_;
   ofstream f_service_;
@@ -179,25 +178,16 @@ void t_rust_generator::init_generator() {
   string program_name_lc = to_lower_case(program_name_u);
 
   /* create output files */
-  string f_types_name = get_out_dir() + this->nspace_lc
-                        + program_name_lc + "_types.h";
-  f_types_.open(f_types_name.c_str());
   string f_types_impl_name = get_out_dir() + this->nspace_lc
-                             + program_name_lc + "_types.c";
+                             + program_name_lc + "_types.rs";
   f_types_impl_.open(f_types_impl_name.c_str());
 
   /* add thrift boilerplate headers */
-  f_types_ << autogen_comment();
   f_types_impl_ << autogen_comment();
 
-  /* include inclusion guard */
-  f_types_ << 
-    "#ifndef " << this->nspace_uc << program_name_uc << "_TYPES_H" << endl <<
-    "#define " << this->nspace_uc << program_name_uc << "_TYPES_H" << endl <<
-    endl;
 
   /* include base types */
-  f_types_ <<
+  f_types_impl_ <<
     "/* base includes */" << endl <<
     "#include <glib-object.h>" << endl <<
     "#include <thrift/c_glib/thrift_struct.h>" << endl <<
@@ -206,26 +196,26 @@ void t_rust_generator::init_generator() {
   /* include other thrift includes */
   const vector<t_program *> &includes = program_->get_includes();
   for (size_t i = 0; i < includes.size(); ++i) {
-    f_types_ <<
+    f_types_impl_ <<
       "/* other thrift includes */" << endl <<
       "#include \"" << this->nspace_lc << initial_caps_to_underscores(includes[i]->get_name()) <<
           "_types.h\"" << endl;
   }
-  f_types_ << endl;
+  f_types_impl_ << endl;
 
   /* include custom headers */
-  const vector<string> &c_includes = program_->get_c_includes();
-  f_types_ << "/* custom thrift includes */" << endl;
-  for (size_t i = 0; i < c_includes.size(); ++i) {
-    if (c_includes[i][0] == '<') {
-      f_types_ <<
-        "#include " << c_includes[i] << endl;
+  const vector<string> &rust_includes = program_->get_rust_includes();
+  f_types_impl_ << "/* custom thrift includes */" << endl;
+  for (size_t i = 0; i < rust_includes.size(); ++i) {
+    if (rust_includes[i][0] == '<') {
+      f_types_impl_ <<
+        "#include " << rust_includes[i] << endl;
     } else {
-      f_types_ <<
-        "#include \"" << c_includes[i] << "\"" << endl;
+      f_types_impl_ <<
+        "#include \"" << rust_includes[i] << "\"" << endl;
     }
   }
-  f_types_ << endl;
+  f_types_impl_ << endl;
 
   // include the types file
   f_types_impl_ <<
@@ -235,7 +225,7 @@ void t_rust_generator::init_generator() {
     "#include <thrift/c_glib/thrift.h>" << endl <<
     endl;
 
-  f_types_ <<
+  f_types_impl_ <<
     "/* begin types */" << endl << endl;
 }
 
@@ -246,12 +236,7 @@ void t_rust_generator::close_generator() {
   string program_name_uc = to_upper_case 
     (initial_caps_to_underscores(program_name_));
 
-  /* end the header inclusion guard */
-  f_types_ <<
-    "#endif /* " << this->nspace_uc << program_name_uc << "_TYPES_H */" << endl;
-
   /* close output file */
-  f_types_.close();
   f_types_impl_.close();
 }
 
@@ -265,7 +250,7 @@ void t_rust_generator::close_generator() {
  * typedef GHashTable * ThriftSomeMap;
  */
 void t_rust_generator::generate_typedef(t_typedef* ttypedef) {
-  f_types_ <<
+  f_types_impl_ <<
     indent() << "typedef " << type_name(ttypedef->get_type(), true) <<
         " " << this->nspace << ttypedef->get_symbolic() << ";" << endl <<
     endl;
@@ -291,7 +276,7 @@ void t_rust_generator::generate_enum(t_enum *tenum) {
   string name = tenum->get_name();
   string name_uc = to_upper_case(initial_caps_to_underscores(name));
 
-  f_types_ <<
+  f_types_impl_ <<
     indent() << "enum _" << this->nspace << name << " {" << endl;
 
   indent_up();
@@ -305,19 +290,19 @@ void t_rust_generator::generate_enum(t_enum *tenum) {
     if (first) {
       first = false;
     } else {
-      f_types_ << "," << endl;
+      f_types_impl_ << "," << endl;
     }
 
-    f_types_ <<
+    f_types_impl_ <<
       indent() << this->nspace_uc << name_uc << "_" << (*c_iter)->get_name();
     if ((*c_iter)->has_value()) {
-      f_types_ <<
+      f_types_impl_ <<
         " = " << (*c_iter)->get_value();
     }
   }
 
   indent_down();
-  f_types_ <<
+  f_types_impl_ <<
     endl <<
     "};" << endl <<
     "typedef enum _" << this->nspace << name << " " << this->nspace << name << ";" << endl <<
@@ -328,7 +313,6 @@ void t_rust_generator::generate_enum(t_enum *tenum) {
  * Generates Thrift constants in C code.
  */
 void t_rust_generator::generate_consts (vector<t_const *> consts) {
-  f_types_ << "/* constants */" << endl;
   f_types_impl_ << "/* constants */" << endl;
 
   vector<t_const *>::iterator c_iter;
@@ -339,14 +323,13 @@ void t_rust_generator::generate_consts (vector<t_const *> consts) {
     t_type *type = (*c_iter)->get_type();
     t_const_value *value = (*c_iter)->get_value();
 
-    f_types_ <<
+    f_types_impl_ <<
       indent() << "#define " << this->nspace_uc << name_uc << " " <<
           constant_value (name_lc, type, value) << endl;
 
     generate_const_initializer (name_lc, type, value);
   }
 
-  f_types_ << endl;
   f_types_impl_ << endl;
 }
 
@@ -372,7 +355,7 @@ void t_rust_generator::generate_consts (vector<t_const *> consts) {
  * // ... additional GObject boilerplate ...
  */
 void t_rust_generator::generate_struct (t_struct *tstruct) {
-  f_types_ << "/* struct " << tstruct->get_name() << " */" << endl;
+  f_types_impl_ << "/* struct " << tstruct->get_name() << " */" << endl;
   generate_object(tstruct);
 }
 
@@ -456,7 +439,7 @@ void t_rust_generator::generate_xception (t_struct *tstruct) {
 
   generate_object(tstruct);
 
-  f_types_ << "/* exception */" << endl <<
+  f_types_impl_ << "/* exception */" << endl <<
     "typedef enum" << endl <<
     "{" << endl <<
     "  " << this->nspace_uc << name_uc << "_ERROR_CODE," << endl <<
@@ -1675,7 +1658,7 @@ void t_rust_generator::generate_object(t_struct *tstruct) {
   string name_uc = to_upper_case(name_u);
 
   // write the instance definition
-  f_types_ <<
+  f_types_impl_ <<
     "struct _" << this->nspace << name << endl <<
     "{ " << endl <<
     "  ThriftStruct parent; " << endl <<
@@ -1687,23 +1670,23 @@ void t_rust_generator::generate_object(t_struct *tstruct) {
   const vector<t_field *> &members = tstruct->get_members();
   for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
     t_type *t = get_true_type ((*m_iter)->get_type());
-    f_types_ <<
+    f_types_impl_ <<
       "  " << type_name (t) << " " << (*m_iter)->get_name() << ";" << endl;
     if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-      f_types_ <<
+      f_types_impl_ <<
         "  gboolean __isset_" << (*m_iter)->get_name() << ";" << endl;
     }
   }
 
   // close the structure definition and create a typedef
-  f_types_ <<
+  f_types_impl_ <<
     "};" << endl <<
     "typedef struct _" << this->nspace << name << " " << 
         this->nspace << name << ";" << endl <<
       endl;
 
   // write the class definition
-  f_types_ <<
+  f_types_impl_ <<
     "struct _" << this->nspace << name << "Class" << endl <<
     "{" << endl <<
     "  ThriftStructClass parent;" << endl <<
@@ -1712,7 +1695,7 @@ void t_rust_generator::generate_object(t_struct *tstruct) {
     endl;
 
   // write the standard GObject boilerplate
-  f_types_ <<
+  f_types_impl_ <<
     "GType " << this->nspace_lc << name_u << "_get_type (void);" << endl <<
     "#define " << this->nspace_uc << "TYPE_" << name_uc << " (" << this->nspace_lc << name_u << "_get_type())" << endl <<
     "#define " << this->nspace_uc << name_uc << "(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), " << this->nspace_uc << "TYPE_" << name_uc << ", " << this->nspace << name << "))" << endl <<

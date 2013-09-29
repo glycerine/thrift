@@ -26,7 +26,10 @@ class t_container : public t_type {
  public:
   t_container() :
     cpp_name_(),
-    has_cpp_name_(false) {}
+    has_cpp_name_(false),
+    rust_name_(),
+    has_rust_name_(false) 
+      {}
 
   virtual ~t_container() {}
 
@@ -43,6 +46,19 @@ class t_container : public t_type {
     return cpp_name_;
   }
 
+  void set_rust_name(std::string rust_name) {
+    rust_name_ = rust_name;
+    has_rust_name_ = true;
+  }
+
+  bool has_rust_name() {
+    return has_rust_name_;
+  }
+
+  std::string get_rust_name() {
+    return rust_name_;
+  }
+
   bool is_container() const {
     return true;
   }
@@ -50,6 +66,9 @@ class t_container : public t_type {
  private:
   std::string cpp_name_;
   bool has_cpp_name_;
+
+  std::string rust_name_;
+  bool has_rust_name_;
 
 };
 
