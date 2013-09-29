@@ -21,4399 +21,766 @@
  * details.
  */
 
-#include <cassert>
-
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
-#include <sys/stat.h>
+#include <ctype.h>
 
 #include "platform.h"
 #include "t_oop_generator.h"
 
 using std::map;
 using std::ofstream;
-using std::ostream;
+using std::ostringstream;
 using std::string;
+using std::stringstream;
 using std::vector;
 
 static const string endl = "\n";  // avoid ostream << std::endl flushes
 
+//namespace rust_generator {
+
+/* forward declarations */
+string initial_caps_to_underscores(string name);
+string to_upper_case(string name);
+string to_lower_case(string name);
+
 /**
- * Rust code generator. Start from C++ code generator and adapt.
- *
+ * Rust code generator. Based on c_glib, which uses glib for C typing.
+ *  This should become less glib and more Rust as we finish it out.
  */
 class t_rust_generator : public t_oop_generator {
  public:
-  t_rust_generator(
-      t_program* program,
-      const std::map<std::string, std::string>& parsed_options,
-      const std::string& option_string)
-    : t_oop_generator(program)
+
+  /* constructor */
+  t_rust_generator(t_program *program,
+                     const map<string, string> &parsed_options,
+                     const string &option_string) : t_oop_generator(program)
   {
+    (void) parsed_options;
     (void) option_string;
-    std::map<std::string, std::string>::const_iterator iter;
+    /* set the output directory */
+    this->out_dir_base_ = "gen-c_glib";
 
-    iter = parsed_options.find("pure_enums");
-    gen_pure_enums_ = (iter != parsed_options.end());
+    /* set the namespace */
+    this->nspace = program_->get_namespace("c_glib");
 
-    iter = parsed_options.find("dense");
-    gen_dense_ = (iter != parsed_options.end());
+    if (this->nspace.empty()) {
+      this->nspace = "";
+      this->nspace_u = "";
+      this->nspace_uc = "";
+      this->nspace_lc = "";
+    } else {
+      /* replace dots with underscores */
+      char *tmp = strdup(this->nspace.c_str());
+      for (unsigned int i = 0; i < strlen(tmp); i++) {
+        if (tmp[i] == '.') {
+          tmp[i] = '_';
+        }
+      }
+      this->nspace = string(tmp, strlen(tmp));
+      free(tmp);
 
-    iter = parsed_options.find("include_prefix");
-    use_include_prefix_ = (iter != parsed_options.end());
-
-    iter = parsed_options.find("cob_style");
-    gen_cob_style_ = (iter != parsed_options.end());
-
-    iter = parsed_options.find("no_client_completion");
-    gen_no_client_completion_ = (iter != parsed_options.end());
-
-    iter = parsed_options.find("no_default_operators");
-    gen_no_default_operators_ = (iter != parsed_options.end());
-
-    iter = parsed_options.find("templates");
-    gen_templates_ = (iter != parsed_options.end());
-
-    gen_templates_only_ =
-      (iter != parsed_options.end() && iter->second == "only");
-
-    out_dir_base_ = "gen-rust";
+      /* clean up the namespace for C.
+       * An input of 'namespace foo' should result in:
+       *  - nspace = foo       - for thrift objects and typedefs
+       *  - nspace_u = Foo     - for internal GObject prefixes
+       *  - nspace_uc = FOO_   - for macro prefixes
+       *  - nspace_lc = foo_   - for filename and method prefixes
+       * The underscores are there since uc and lc strings are used as file and
+       * variable prefixes.
+       */
+      this->nspace_u = initial_caps_to_underscores(this->nspace);
+      this->nspace_uc = to_upper_case(this->nspace_u) + "_";
+      this->nspace_lc = to_lower_case(this->nspace_u) + "_";
+    }
   }
 
-  /**
-   * Init and close methods
-   */
-
+  /* initialization and destruction */
   void init_generator();
   void close_generator();
 
-  void generate_consts(std::vector<t_const*> consts);
-
-  /**
-   * Program-level generation functions
-   */
-
-  void generate_typedef(t_typedef* ttypedef);
-  void generate_enum(t_enum* tenum);
-  void generate_struct(t_struct* tstruct) {
-    generate_rust_struct(tstruct, false);
-  }
-  void generate_xception(t_struct* txception) {
-    generate_rust_struct(txception, true);
-  }
-  void generate_rust_struct(t_struct* tstruct, bool is_exception);
-
-  void generate_service(t_service* tservice);
-
-  void print_const_value(std::ofstream& out, std::string name, t_type* type, t_const_value* value);
-  std::string render_const_value(std::ofstream& out, std::string name, t_type* type, t_const_value* value);
-
-  void generate_struct_definition    (std::ofstream& out, t_struct* tstruct,
-                                      bool is_exception=false,
-                                      bool pointers=false,
-                                      bool read=true,
-                                      bool write=true,
-                                      bool swap=false);
-  void generate_struct_fingerprint   (std::ofstream& out, t_struct* tstruct, bool is_definition);
-  void generate_struct_reader        (std::ofstream& out, t_struct* tstruct, bool pointers=false);
-  void generate_struct_writer        (std::ofstream& out, t_struct* tstruct, bool pointers=false);
-  void generate_struct_result_writer (std::ofstream& out, t_struct* tstruct, bool pointers=false);
-  void generate_struct_swap          (std::ofstream& out, t_struct* tstruct);
-
-  /**
-   * Service-level generation functions
-   */
-
-  void generate_service_interface (t_service* tservice, string style);
-  void generate_service_interface_factory (t_service* tservice, string style);
-  void generate_service_null      (t_service* tservice, string style);
-  void generate_service_multiface (t_service* tservice);
-  void generate_service_helpers   (t_service* tservice);
-  void generate_service_client    (t_service* tservice, string style);
-  void generate_service_processor (t_service* tservice, string style);
-  void generate_service_skeleton  (t_service* tservice);
-  void generate_process_function  (t_service* tservice, t_function* tfunction,
-                                   string style, bool specialized=false);
-  void generate_function_helpers  (t_service* tservice, t_function* tfunction);
-  void generate_service_async_skeleton (t_service* tservice);
-
-  /**
-   * Serialization constructs
-   */
-
-  void generate_deserialize_field        (std::ofstream& out,
-                                          t_field*    tfield,
-                                          std::string prefix="",
-                                          std::string suffix="");
-
-  void generate_deserialize_struct       (std::ofstream& out,
-                                          t_struct*   tstruct,
-                                          std::string prefix="");
-
-  void generate_deserialize_container    (std::ofstream& out,
-                                          t_type*     ttype,
-                                          std::string prefix="");
-
-  void generate_deserialize_set_element  (std::ofstream& out,
-                                          t_set*      tset,
-                                          std::string prefix="");
-
-  void generate_deserialize_map_element  (std::ofstream& out,
-                                          t_map*      tmap,
-                                          std::string prefix="");
-
-  void generate_deserialize_list_element (std::ofstream& out,
-                                          t_list*     tlist,
-                                          std::string prefix,
-                                          bool push_back,
-                                          std::string index);
-
-  void generate_serialize_field          (std::ofstream& out,
-                                          t_field*    tfield,
-                                          std::string prefix="",
-                                          std::string suffix="");
-
-  void generate_serialize_struct         (std::ofstream& out,
-                                          t_struct*   tstruct,
-                                          std::string prefix="");
-
-  void generate_serialize_container      (std::ofstream& out,
-                                          t_type*     ttype,
-                                          std::string prefix="");
-
-  void generate_serialize_map_element    (std::ofstream& out,
-                                          t_map*      tmap,
-                                          std::string iter);
-
-  void generate_serialize_set_element    (std::ofstream& out,
-                                          t_set*      tmap,
-                                          std::string iter);
-
-  void generate_serialize_list_element   (std::ofstream& out,
-                                          t_list*     tlist,
-                                          std::string iter);
-
-  void generate_function_call            (ostream& out,
-                                          t_function* tfunction,
-                                          string target,
-                                          string iface,
-                                          string arg_prefix);
-  /*
-   * Helper rendering functions
-   */
-
-  std::string namespace_prefix(std::string ns);
-  std::string namespace_open(std::string ns);
-  std::string namespace_close(std::string ns);
-  std::string type_name(t_type* ttype, bool in_typedef=false, bool arg=false);
-  std::string base_type_name(t_base_type::t_base tbase);
-  std::string declare_field(t_field* tfield, bool init=false, bool pointer=false, bool constant=false, bool reference=false);
-  std::string function_signature(t_function* tfunction, std::string style, std::string prefix="", bool name_params=true);
-  std::string cob_function_signature(t_function* tfunction, std::string prefix="", bool name_params=true);
-  std::string argument_list(t_struct* tstruct, bool name_params=true, bool start_comma=false);
-  std::string type_to_enum(t_type* ttype);
-  std::string local_reflection_name(const char*, t_type* ttype, bool external=false);
-
-  void generate_enum_constant_list(std::ofstream& f,
-                                   const vector<t_enum_value*>& constants,
-                                   const char* prefix,
-                                   const char* suffix,
-                                   bool include_values);
-
-  // These handles checking gen_dense_ and checking for duplicates.
-  void generate_local_reflection(std::ofstream& out, t_type* ttype, bool is_definition);
-  void generate_local_reflection_pointer(std::ofstream& out, t_type* ttype);
-
-  bool is_complex_type(t_type* ttype) {
-    ttype = get_true_type(ttype);
-
-    return
-      ttype->is_container() ||
-      ttype->is_struct() ||
-      ttype->is_xception() ||
-      (ttype->is_base_type() && (((t_base_type*)ttype)->get_base() == t_base_type::TYPE_STRING));
-  }
-
-  void set_use_include_prefix(bool use_include_prefix) {
-    use_include_prefix_ = use_include_prefix;
-  }
+  /* generation functions */
+  void generate_typedef(t_typedef *ttypedef);
+  void generate_enum(t_enum *tenum);
+  void generate_consts(vector<t_const *> consts);
+  void generate_struct(t_struct *tstruct);
+  void generate_service(t_service *tservice);
+  void generate_xception(t_struct *tstruct);
 
  private:
-  /**
-   * Returns the include prefix to use for a file generated by program, or the
-   * empty string if no include prefix should be used.
-   */
-  std::string get_include_prefix(const t_program& program) const;
 
-  /**
-   * True if we should generate pure enums for Thrift enums, instead of wrapper classes.
-   */
-  bool gen_pure_enums_;
+  /* file streams */
+  ofstream f_types_;
+  ofstream f_types_impl_;
+  ofstream f_header_;
+  ofstream f_service_;
 
-  /**
-   * True if we should generate local reflection metadata for TDenseProtocol.
-   */
-  bool gen_dense_;
+  /* namespace variables */
+  string nspace;
+  string nspace_u;
+  string nspace_uc;
+  string nspace_lc;
 
-  /**
-   * True if we should generate templatized reader/writer methods.
-   */
-  bool gen_templates_;
+  /* helper functions */
+  bool is_complex_type(t_type *ttype);
+  string type_name(t_type* ttype, bool in_typedef=false, bool is_const=false);
+  string base_type_name(t_base_type *type);
+  string type_to_enum(t_type *type);
+  string constant_value(string name, t_type *type, t_const_value *value);
+  string function_signature(t_function *tfunction);
+  string argument_list(t_struct *tstruct);
+  string xception_list(t_struct *tstruct);
+  string declare_field(t_field *tfield, bool init=false, bool pointer=false, bool constant=false, bool reference=false);
+  void declare_local_variable(ofstream &out, t_type *ttype, string &base_name);
 
-  /**
-   * True iff we should generate process function pointers for only templatized
-   * reader/writer methods.
-   */
-  bool gen_templates_only_;
+  /* generation functions */
+  void generate_const_initializer(string name, t_type *type, t_const_value *value);
+  void generate_service_client(t_service *tservice);
+  void generate_service_server(t_service *tservice);
+  void generate_object(t_struct *tstruct);
+  void generate_struct_writer(ofstream &out, t_struct *tstruct, string this_name, string this_get="", bool is_function=true);
+  void generate_struct_reader(ofstream &out, t_struct *tstruct, string this_name, string this_get="", bool is_function=true);
 
-  /**
-   * True iff we should use a path prefix in our #include statements for other
-   * thrift-generated header files.
-   */
-  bool use_include_prefix_;
+  void generate_serialize_field(ofstream &out, t_field *tfield, string prefix, string suffix, int error_ret);
+  void generate_serialize_struct(ofstream &out, t_struct *tstruct, string prefix, int error_ret);
+  void generate_serialize_container(ofstream &out, t_type *ttype, string prefix, int error_ret);
+  void generate_serialize_map_element(ofstream &out, t_map *tmap, string key, string value, int error_ret);
+  void generate_serialize_set_element(ofstream &out, t_set *tset, string element, int error_ret);
+  void generate_serialize_list_element(ofstream &out, t_list *tlist, string list, string index, int error_ret);
 
-  /**
-   * True if we should generate "Continuation OBject"-style classes as well.
-   */
-  bool gen_cob_style_;
+  void generate_deserialize_field(ofstream &out, t_field *tfield, string prefix, string suffix, int error_ret, bool allocate=true);
+  void generate_deserialize_struct(ofstream &out, t_struct *tstruct, string prefix, int error_ret, bool allocate=true);
+  void generate_deserialize_container(ofstream &out, t_type *ttype, string prefix, int error_ret);
+  void generate_deserialize_map_element(ofstream &out, t_map *tmap, string prefix, int error_ret);
+  void generate_deserialize_set_element(ofstream &out, t_set *tset, string prefix, int error_ret);
+  void generate_deserialize_list_element(ofstream &out, t_list *tlist, string prefix, string index, int error_ret);
 
-  /**
-   * True if we should omit calls to completion__() in CobClient class.
-   */
-  bool gen_no_client_completion_;
+  string generate_new_hash_from_type(t_type * key, t_type * value);
+  string generate_new_array_from_type(t_type * ttype); 
 
-  /**
-   * True if we should omit generating the default opeartors ==, != and <.
-   */
-  bool gen_no_default_operators_;
-
-  /**
-   * Strings for namespace, computed once up front then used directly
-   */
-
-  std::string ns_open_;
-  std::string ns_close_;
-
-  /**
-   * File streams, stored here to avoid passing them as parameters to every
-   * function.
-   */
-
-  std::ofstream f_types_;
-  std::ofstream f_types_impl_;
-  std::ofstream f_types_tcc_;
-  std::ofstream f_header_;
-  std::ofstream f_service_;
-  std::ofstream f_service_tcc_;
-
-  /**
-   * When generating local reflections, make sure we don't generate duplicates.
-   */
-  std::set<std::string> reflected_fingerprints_;
-
-  // The ProcessorGenerator is used to generate parts of the code,
-  // so it needs access to many of our protected members and methods.
-  //
-  // TODO: The code really should be cleaned up so that helper methods for
-  // writing to the output files are separate from the generator classes
-  // themselves.
-  friend class RustProcessorGenerator;
+  string generate_free_func_from_type(t_type * ttype);
+  string generate_hash_func_from_type(t_type * ttype);
+  string generate_cmp_func_from_type(t_type * ttype);
 };
 
 /**
- * Prepares for file generation by opening up the necessary file output
- * streams.
+ * Prepare for file generation by opening up the necessary file
+ * output streams.
  */
 void t_rust_generator::init_generator() {
-  // Make output directory
+  /* create output directory */
   MKDIR(get_out_dir().c_str());
 
-  // Make output file
-  string f_types_name = get_out_dir()+program_name_+"_types.h";
-  f_types_.open(f_types_name.c_str());
+  string program_name_u = initial_caps_to_underscores(program_name_);
+  string program_name_uc = to_upper_case(program_name_u);
+  string program_name_lc = to_lower_case(program_name_u);
 
-  string f_types_impl_name = get_out_dir()+program_name_+"_types.rs";
+  /* create output files */
+  string f_types_name = get_out_dir() + this->nspace_lc
+                        + program_name_lc + "_types.h";
+  f_types_.open(f_types_name.c_str());
+  string f_types_impl_name = get_out_dir() + this->nspace_lc
+                             + program_name_lc + "_types.c";
   f_types_impl_.open(f_types_impl_name.c_str());
 
-  if (gen_templates_) {
-    // If we don't open the stream, it appears to just discard data,
-    // which is fine.
-    string f_types_tcc_name = get_out_dir()+program_name_+"_types.tcc";
-    f_types_tcc_.open(f_types_tcc_name.c_str());
-  }
+  /* add thrift boilerplate headers */
+  f_types_ << autogen_comment();
+  f_types_impl_ << autogen_comment();
 
-  // Print header
-  f_types_ <<
-    autogen_comment();
-  f_types_impl_ <<
-    autogen_comment();
-  f_types_tcc_ <<
-    autogen_comment();
-
-  // Start ifndef
-  f_types_ <<
-    "#ifndef " << program_name_ << "_TYPES_H" << endl <<
-    "#define " << program_name_ << "_TYPES_H" << endl <<
-    endl;
-  f_types_tcc_ <<
-    "#ifndef " << program_name_ << "_TYPES_TCC" << endl <<
-    "#define " << program_name_ << "_TYPES_TCC" << endl <<
+  /* include inclusion guard */
+  f_types_ << 
+    "#ifndef " << this->nspace_uc << program_name_uc << "_TYPES_H" << endl <<
+    "#define " << this->nspace_uc << program_name_uc << "_TYPES_H" << endl <<
     endl;
 
-  // Include base types
+  /* include base types */
   f_types_ <<
-    "#include <thrift/Thrift.h>" << endl <<
-    "#include <thrift/TApplicationException.h>" << endl <<
-    "#include <thrift/protocol/TProtocol.h>" << endl <<
-    "#include <thrift/transport/TTransport.h>" << endl <<
-    endl;
-  // Include C++xx compatibility header
-  f_types_ << "#include <thrift/cxxfunctional.h>" << endl;
+    "/* base includes */" << endl <<
+    "#include <glib-object.h>" << endl <<
+    "#include <thrift/c_glib/thrift_struct.h>" << endl <<
+    "#include <thrift/c_glib/protocol/thrift_protocol.h>" << endl;
 
-  // Include other Thrift includes
-  const vector<t_program*>& includes = program_->get_includes();
+  /* include other thrift includes */
+  const vector<t_program *> &includes = program_->get_includes();
   for (size_t i = 0; i < includes.size(); ++i) {
     f_types_ <<
-      "#include \"" << get_include_prefix(*(includes[i])) <<
-      includes[i]->get_name() << "_types.h\"" << endl;
-
-    // XXX(simpkins): If gen_templates_ is enabled, we currently assume all
-    // included files were also generated with templates enabled.
-    f_types_tcc_ <<
-      "#include \"" << get_include_prefix(*(includes[i])) <<
-      includes[i]->get_name() << "_types.tcc\"" << endl;
+      "/* other thrift includes */" << endl <<
+      "#include \"" << this->nspace_lc << initial_caps_to_underscores(includes[i]->get_name()) <<
+          "_types.h\"" << endl;
   }
   f_types_ << endl;
 
-  // Include custom headers
-  const vector<string>& rust_includes = program_->get_rust_includes();
-  for (size_t i = 0; i < rust_includes.size(); ++i) {
-    if (rust_includes[i][0] == '<') {
+  /* include custom headers */
+  const vector<string> &c_includes = program_->get_c_includes();
+  f_types_ << "/* custom thrift includes */" << endl;
+  for (size_t i = 0; i < c_includes.size(); ++i) {
+    if (c_includes[i][0] == '<') {
       f_types_ <<
-        "#include " << rust_includes[i] << endl;
+        "#include " << c_includes[i] << endl;
     } else {
       f_types_ <<
-        "#include \"" << rust_includes[i] << "\"" << endl;
+        "#include \"" << c_includes[i] << "\"" << endl;
     }
   }
-  f_types_ <<
-    endl;
+  f_types_ << endl;
 
-  // Include the types file
+  // include the types file
   f_types_impl_ <<
-    "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-    "_types.h\"" << endl <<
+    endl <<
+    "#include \"" << this->nspace_lc << program_name_u << 
+        "_types.h\"" << endl <<
+    "#include <thrift/c_glib/thrift.h>" << endl <<
     endl;
-  f_types_tcc_ <<
-    "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-    "_types.h\"" << endl <<
-    endl;
-
-  // If we are generating local reflection metadata, we need to include
-  // the definition of TypeSpec.
-  if (gen_dense_) {
-    f_types_impl_ <<
-      "#include <thrift/TReflectionLocal.h>" << endl <<
-      endl;
-  }
-
-  // The swap() code needs <algorithm> for std::swap()
-  f_types_impl_ << "#include <algorithm>" << endl << endl;
-
-  // Open namespace
-  ns_open_ = namespace_open(program_->get_namespace("rust"));
-  ns_close_ = namespace_close(program_->get_namespace("rust"));
 
   f_types_ <<
-    ns_open_ << endl <<
-    endl;
-
-  f_types_impl_ <<
-    ns_open_ << endl <<
-    endl;
-
-  f_types_tcc_ <<
-    ns_open_ << endl <<
-    endl;
+    "/* begin types */" << endl << endl;
 }
 
 /**
- * Closes the output files.
+ *  Finish up generation and close all file streams.
  */
 void t_rust_generator::close_generator() {
-  // Close namespace
+  string program_name_uc = to_upper_case 
+    (initial_caps_to_underscores(program_name_));
+
+  /* end the header inclusion guard */
   f_types_ <<
-    ns_close_ << endl <<
-    endl;
-  f_types_impl_ <<
-    ns_close_ << endl;
-  f_types_tcc_ <<
-    ns_close_ << endl <<
-    endl;
+    "#endif /* " << this->nspace_uc << program_name_uc << "_TYPES_H */" << endl;
 
-  // Include the types.tcc file from the types header file,
-  // so clients don't have to explicitly include the tcc file.
-  // TODO(simpkins): Make this a separate option.
-  if (gen_templates_) {
-    f_types_ <<
-      "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-      "_types.tcc\"" << endl <<
-      endl;
-  }
-
-  // Close ifndef
-  f_types_ <<
-    "#endif" << endl;
-  f_types_tcc_ <<
-    "#endif" << endl;
-
-  // Close output file
+  /* close output file */
   f_types_.close();
   f_types_impl_.close();
-  f_types_tcc_.close();
 }
 
 /**
- * Generates a typedef. This is just a simple 1-liner in C++
- *
- * @param ttypedef The type definition
+ * Generates a Thrift typedef in C code.  For example:
+ * 
+ * Thrift: 
+ * typedef map<i32,i32> SomeMap
+ * 
+ * C: 
+ * typedef GHashTable * ThriftSomeMap;
  */
 void t_rust_generator::generate_typedef(t_typedef* ttypedef) {
   f_types_ <<
-    indent() << "typedef " << type_name(ttypedef->get_type(), true) << " " << ttypedef->get_symbolic() << ";" << endl <<
+    indent() << "typedef " << type_name(ttypedef->get_type(), true) <<
+        " " << this->nspace << ttypedef->get_symbolic() << ";" << endl <<
     endl;
-}
+} 
 
+/**
+ * Generates a C enumeration.  For example:
+ *
+ * Thrift:
+ * enum MyEnum {
+ *   ONE = 1,
+ *   TWO
+ * }
+ *
+ * C:
+ * enum _ThriftMyEnum {
+ *   THRIFT_MY_ENUM_ONE = 1,
+ *   THRIFT_MY_ENUM_TWO
+ * };
+ * typedef enum _ThriftMyEnum ThriftMyEnum;
+ */
+void t_rust_generator::generate_enum(t_enum *tenum) {
+  string name = tenum->get_name();
+  string name_uc = to_upper_case(initial_caps_to_underscores(name));
 
-void t_rust_generator::generate_enum_constant_list(std::ofstream& f,
-                                                  const vector<t_enum_value*>& constants,
-                                                  const char* prefix,
-                                                  const char* suffix,
-                                                  bool include_values) {
-  f << " {" << endl;
+  f_types_ <<
+    indent() << "enum _" << this->nspace << name << " {" << endl;
+
   indent_up();
 
-  vector<t_enum_value*>::const_iterator c_iter;
+  vector<t_enum_value *> constants = tenum->get_constants();
+  vector<t_enum_value *>::iterator c_iter;
   bool first = true;
+
+  /* output each of the enumeration elements */
   for (c_iter = constants.begin(); c_iter != constants.end(); ++c_iter) {
     if (first) {
       first = false;
     } else {
-      f << "," << endl;
+      f_types_ << "," << endl;
     }
-    indent(f)
-      << prefix << (*c_iter)->get_name() << suffix;
-    if (include_values && (*c_iter)->has_value()) {
-      f << " = " << (*c_iter)->get_value();
+
+    f_types_ <<
+      indent() << this->nspace_uc << name_uc << "_" << (*c_iter)->get_name();
+    if ((*c_iter)->has_value()) {
+      f_types_ <<
+        " = " << (*c_iter)->get_value();
     }
   }
 
-  f << endl;
   indent_down();
-  indent(f) << "};" << endl;
+  f_types_ <<
+    endl <<
+    "};" << endl <<
+    "typedef enum _" << this->nspace << name << " " << this->nspace << name << ";" << endl <<
+    endl;
 }
 
 /**
- * Generates code for an enumerated type. In C++, this is essentially the same
- * as the thrift definition itself, using the enum keyword in C++.
- *
- * @param tenum The enumeration
+ * Generates Thrift constants in C code.
  */
-void t_rust_generator::generate_enum(t_enum* tenum) {
-  vector<t_enum_value*> constants = tenum->get_constants();
+void t_rust_generator::generate_consts (vector<t_const *> consts) {
+  f_types_ << "/* constants */" << endl;
+  f_types_impl_ << "/* constants */" << endl;
 
-  std::string enum_name = tenum->get_name();
-  if (!gen_pure_enums_) {
-    enum_name = "type";
+  vector<t_const *>::iterator c_iter;
+  for (c_iter = consts.begin(); c_iter != consts.end(); ++c_iter) {
+    string name = (*c_iter)->get_name();
+    string name_uc = to_upper_case(name);
+    string name_lc = to_lower_case(name);
+    t_type *type = (*c_iter)->get_type();
+    t_const_value *value = (*c_iter)->get_value();
+
     f_types_ <<
-      indent() << "struct " << tenum->get_name() << " {" << endl;
-    indent_up();
-  }
-  f_types_ <<
-    indent() << "enum " << enum_name;
+      indent() << "#define " << this->nspace_uc << name_uc << " " <<
+          constant_value (name_lc, type, value) << endl;
 
-  generate_enum_constant_list(f_types_, constants, "", "", true);
-
-  if (!gen_pure_enums_) {
-    indent_down();
-    f_types_ << "};" << endl;
+    generate_const_initializer (name_lc, type, value);
   }
 
   f_types_ << endl;
-
-  /**
-     Generate a character array of enum names for debugging purposes.
-  */
-  std::string prefix = "";
-  if (!gen_pure_enums_) {
-    prefix = tenum->get_name() + "::";
-  }
-
-  f_types_impl_ <<
-    indent() << "int _k" << tenum->get_name() << "Values[] =";
-  generate_enum_constant_list(f_types_impl_, constants, prefix.c_str(), "", false);
-
-  f_types_impl_ <<
-    indent() << "const char* _k" << tenum->get_name() << "Names[] =";
-  generate_enum_constant_list(f_types_impl_, constants, "\"", "\"", false);
-
-  f_types_ <<
-    indent() << "extern const std::map<int, const char*> _" <<
-    tenum->get_name() << "_VALUES_TO_NAMES;" << endl << endl;
-
-  f_types_impl_ <<
-    indent() << "const std::map<int, const char*> _" << tenum->get_name() <<
-    "_VALUES_TO_NAMES(::apache::thrift::TEnumIterator(" << constants.size() <<
-    ", _k" << tenum->get_name() << "Values" <<
-    ", _k" << tenum->get_name() << "Names), " <<
-    "::apache::thrift::TEnumIterator(-1, NULL, NULL));" << endl << endl;
-
-  generate_local_reflection(f_types_, tenum, false);
-  generate_local_reflection(f_types_impl_, tenum, true);
+  f_types_impl_ << endl;
 }
 
 /**
- * Generates a class that holds all the constants.
- */
-void t_rust_generator::generate_consts(std::vector<t_const*> consts) {
-  string f_consts_name = get_out_dir()+program_name_+"_constants.h";
-  ofstream f_consts;
-  f_consts.open(f_consts_name.c_str());
-
-  string f_consts_impl_name = get_out_dir()+program_name_+"_constants.rs";
-  ofstream f_consts_impl;
-  f_consts_impl.open(f_consts_impl_name.c_str());
-
-  // Print header
-  f_consts <<
-    autogen_comment();
-  f_consts_impl <<
-    autogen_comment();
-
-  // Start ifndef
-  f_consts <<
-    "#ifndef " << program_name_ << "_CONSTANTS_H" << endl <<
-    "#define " << program_name_ << "_CONSTANTS_H" << endl <<
-    endl <<
-    "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-    "_types.h\"" << endl <<
-    endl <<
-    ns_open_ << endl <<
-    endl;
-
-  f_consts_impl <<
-    "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-    "_constants.h\"" << endl <<
-    endl <<
-    ns_open_ << endl <<
-    endl;
-
-  f_consts <<
-    "class " << program_name_ << "Constants {" << endl <<
-    " public:" << endl <<
-    "  " << program_name_ << "Constants();" << endl <<
-    endl;
-  indent_up();
-  vector<t_const*>::iterator c_iter;
-  for (c_iter = consts.begin(); c_iter != consts.end(); ++c_iter) {
-    string name = (*c_iter)->get_name();
-    t_type* type = (*c_iter)->get_type();
-    f_consts <<
-      indent() << type_name(type) << " " << name << ";" << endl;
-  }
-  indent_down();
-  f_consts <<
-    "};" << endl;
-
-  f_consts_impl <<
-    "const " << program_name_ << "Constants g_" << program_name_ << "_constants;" << endl <<
-    endl <<
-    program_name_ << "Constants::" << program_name_ << "Constants() {" << endl;
-  indent_up();
-  for (c_iter = consts.begin(); c_iter != consts.end(); ++c_iter) {
-    print_const_value(f_consts_impl,
-                      (*c_iter)->get_name(),
-                      (*c_iter)->get_type(),
-                      (*c_iter)->get_value());
-  }
-  indent_down();
-  indent(f_consts_impl) <<
-    "}" << endl;
-
-  f_consts <<
-    endl <<
-    "extern const " << program_name_ << "Constants g_" << program_name_ << "_constants;" << endl <<
-    endl <<
-    ns_close_ << endl <<
-    endl <<
-    "#endif" << endl;
-  f_consts.close();
-
-  f_consts_impl <<
-    endl <<
-    ns_close_ << endl <<
-    endl;
-}
-
-/**
- * Prints the value of a constant with the given type. Note that type checking
- * is NOT performed in this function as it is always run beforehand using the
- * validate_types method in main.cc
- */
-void t_rust_generator::print_const_value(ofstream& out, string name, t_type* type, t_const_value* value) {
-  type = get_true_type(type);
-  if (type->is_base_type()) {
-    string v2 = render_const_value(out, name, type, value);
-    indent(out) << name << " = " << v2 << ";" << endl <<
-      endl;
-  } else if (type->is_enum()) {
-    indent(out) << name << " = (" << type_name(type) << ")" << value->get_integer() << ";" << endl <<
-      endl;
-  } else if (type->is_struct() || type->is_xception()) {
-    const vector<t_field*>& fields = ((t_struct*)type)->get_members();
-    vector<t_field*>::const_iterator f_iter;
-    const map<t_const_value*, t_const_value*>& val = value->get_map();
-    map<t_const_value*, t_const_value*>::const_iterator v_iter;
-    bool is_nonrequired_field = false;
-    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
-      is_nonrequired_field = false;
-      for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-        if ((*f_iter)->get_name() == v_iter->first->get_string()) {
-          field_type = (*f_iter)->get_type();
-          is_nonrequired_field = (*f_iter)->get_req() != t_field::T_REQUIRED;
-        }
-      }
-      if (field_type == NULL) {
-        throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
-      }
-      string val = render_const_value(out, name, field_type, v_iter->second);
-      indent(out) << name << "." << v_iter->first->get_string() << " = " << val << ";" << endl;
-      if(is_nonrequired_field) {
-          indent(out) << name << ".__isset." << v_iter->first->get_string() << " = true;" << endl;
-      }
-    }
-    out << endl;
-  } else if (type->is_map()) {
-    t_type* ktype = ((t_map*)type)->get_key_type();
-    t_type* vtype = ((t_map*)type)->get_val_type();
-    const map<t_const_value*, t_const_value*>& val = value->get_map();
-    map<t_const_value*, t_const_value*>::const_iterator v_iter;
-    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      string key = render_const_value(out, name, ktype, v_iter->first);
-      string val = render_const_value(out, name, vtype, v_iter->second);
-      indent(out) << name << ".insert(std::make_pair(" << key << ", " << val << "));" << endl;
-    }
-    out << endl;
-  } else if (type->is_list()) {
-    t_type* etype = ((t_list*)type)->get_elem_type();
-    const vector<t_const_value*>& val = value->get_list();
-    vector<t_const_value*>::const_iterator v_iter;
-    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      string val = render_const_value(out, name, etype, *v_iter);
-      indent(out) << name << ".push_back(" << val << ");" << endl;
-    }
-    out << endl;
-  } else if (type->is_set()) {
-    t_type* etype = ((t_set*)type)->get_elem_type();
-    const vector<t_const_value*>& val = value->get_list();
-    vector<t_const_value*>::const_iterator v_iter;
-    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      string val = render_const_value(out, name, etype, *v_iter);
-      indent(out) << name << ".insert(" << val << ");" << endl;
-    }
-    out << endl;
-  } else {
-    throw "INVALID TYPE IN print_const_value: " + type->get_name();
-  }
-}
-
-/**
+ * Generate Thrift structs in C code, as GObjects.  Example:
  *
- */
-string t_rust_generator::render_const_value(ofstream& out, string name, t_type* type, t_const_value* value) {
-  (void) name;
-  std::ostringstream render;
-
-  if (type->is_base_type()) {
-    t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
-    switch (tbase) {
-    case t_base_type::TYPE_STRING:
-      render << '"' << get_escaped_string(value) << '"';
-      break;
-    case t_base_type::TYPE_BOOL:
-      render << ((value->get_integer() > 0) ? "true" : "false");
-      break;
-    case t_base_type::TYPE_BYTE:
-    case t_base_type::TYPE_I16:
-    case t_base_type::TYPE_I32:
-      render << value->get_integer();
-      break;
-    case t_base_type::TYPE_I64:
-      render << value->get_integer() << "LL";
-      break;
-    case t_base_type::TYPE_DOUBLE:
-      if (value->get_type() == t_const_value::CV_INTEGER) {
-        render << value->get_integer();
-      } else {
-        render << value->get_double();
-      }
-      break;
-    default:
-      throw "compiler error: no const of base type " + t_base_type::t_base_name(tbase);
-    }
-  } else if (type->is_enum()) {
-    render << "(" << type_name(type) << ")" << value->get_integer();
-  } else {
-    string t = tmp("tmp");
-    indent(out) << type_name(type) << " " << t << ";" << endl;
-    print_const_value(out, t, type, value);
-    render << t;
-  }
-
-  return render.str();
-}
-
-/**
- * Generates a struct definition for a thrift data type. This is a class
- * with data members and a read/write() function, plus a mirroring isset
- * inner class.
+ * Thrift:
+ * struct Bonk
+ * {
+ *   1: string message,
+ *   2: i32 type
+ * }
  *
- * @param tstruct The struct definition
- */
-void t_rust_generator::generate_rust_struct(t_struct* tstruct, bool is_exception) {
-  generate_struct_definition(f_types_, tstruct, is_exception,
-                             false, true, true, true);
-  generate_struct_fingerprint(f_types_impl_, tstruct, true);
-  generate_local_reflection(f_types_, tstruct, false);
-  generate_local_reflection(f_types_impl_, tstruct, true);
-  generate_local_reflection_pointer(f_types_impl_, tstruct);
-
-  std::ofstream& out = (gen_templates_ ? f_types_tcc_ : f_types_impl_);
-  generate_struct_reader(out, tstruct);
-  generate_struct_writer(out, tstruct);
-  generate_struct_swap(f_types_impl_, tstruct);
-}
-
-/**
- * Writes the struct definition into the header file
+ * C GObject instance header:
+ * struct _ThriftBonk
+ * {
+ *   GObject parent;
  *
- * @param out Output stream
- * @param tstruct The struct
+ *   gchar * message;
+ *   gint32 type;
+ * };
+ * typedef struct _ThriftBonk ThriftBonk
+ * // ... additional GObject boilerplate ...
  */
-void t_rust_generator::generate_struct_definition(ofstream& out,
-                                                 t_struct* tstruct,
-                                                 bool is_exception,
-                                                 bool pointers,
-                                                 bool read,
-                                                 bool write,
-                                                 bool swap) {
-  string extends = "";
-  if (is_exception) {
-    extends = " : public ::apache::thrift::TException";
-  }
-
-  // Get members
-  vector<t_field*>::const_iterator m_iter;
-  const vector<t_field*>& members = tstruct->get_members();
-
-  // Write the isset structure declaration outside the class. This makes
-  // the generated code amenable to processing by SWIG.
-  // We only declare the struct if it gets used in the class.
-
-  // Isset struct has boolean fields, but only for non-required fields.
-  bool has_nonrequired_fields = false;
-  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-    if ((*m_iter)->get_req() != t_field::T_REQUIRED)
-      has_nonrequired_fields = true;
-  }
-
-  if (has_nonrequired_fields && (!pointers || read)) {
-
-    out <<
-      indent() << "typedef struct _" << tstruct->get_name() << "__isset {" << endl;
-    indent_up();
-
-    indent(out) <<
-      "_" << tstruct->get_name() << "__isset() ";
-    bool first = true;
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      if ((*m_iter)->get_req() == t_field::T_REQUIRED) {
-        continue;
-      }
-      string isSet = ((*m_iter)->get_value() != NULL) ? "true" : "false";
-      if (first) {
-        first = false;
-        out <<
-          ": " << (*m_iter)->get_name() << "(" << isSet << ")";
-      } else {
-        out <<
-          ", " << (*m_iter)->get_name() << "(" << isSet << ")";
-      }
-    }
-    out << " {}" << endl;
-
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-        indent(out) <<
-          "bool " << (*m_iter)->get_name() << ";" << endl;
-        }
-      }
-
-      indent_down();
-      indent(out) <<
-        "} _" << tstruct->get_name() << "__isset;" << endl;
-    }
-
-  out << endl;
-
-  // Open struct def
-  out <<
-    indent() << "class " << tstruct->get_name() << extends << " {" << endl <<
-    indent() << " public:" << endl <<
-    endl;
-  indent_up();
-
-  // Put the fingerprint up top for all to see.
-  generate_struct_fingerprint(out, tstruct, false);
-
-  if (!pointers) {
-    // Default constructor
-    indent(out) <<
-      tstruct->get_name() << "()";
-
-    bool init_ctor = false;
-
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      t_type* t = get_true_type((*m_iter)->get_type());
-      if (t->is_base_type() || t->is_enum()) {
-        string dval;
-        if (t->is_enum()) {
-          dval += "(" + type_name(t) + ")";
-        }
-        dval += t->is_string() ? "" : "0";
-        t_const_value* cv = (*m_iter)->get_value();
-        if (cv != NULL) {
-          dval = render_const_value(out, (*m_iter)->get_name(), t, cv);
-        }
-        if (!init_ctor) {
-          init_ctor = true;
-          out << " : ";
-          out << (*m_iter)->get_name() << "(" << dval << ")";
-        } else {
-          out << ", " << (*m_iter)->get_name() << "(" << dval << ")";
-        }
-      }
-    }
-    out << " {" << endl;
-    indent_up();
-    // TODO(dreiss): When everything else in Thrift is perfect,
-    // do more of these in the initializer list.
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      t_type* t = get_true_type((*m_iter)->get_type());
-
-      if (!t->is_base_type()) {
-        t_const_value* cv = (*m_iter)->get_value();
-        if (cv != NULL) {
-          print_const_value(out, (*m_iter)->get_name(), t, cv);
-        }
-      }
-    }
-    scope_down(out);
-  }
-
-  if (tstruct->annotations_.find("final") == tstruct->annotations_.end()) {
-    out <<
-      endl <<
-      indent() << "virtual ~" << tstruct->get_name() << "() throw() {}" << endl << endl;
-  }
-
-  // Pointer to this structure's reflection local typespec.
-  if (gen_dense_) {
-    indent(out) <<
-      "static ::apache::thrift::reflection::local::TypeSpec* local_reflection;" <<
-      endl << endl;
-  }
-
-  // Declare all fields
-  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-    indent(out) <<
-      declare_field(*m_iter, false, pointers && !(*m_iter)->get_type()->is_xception(), !read) << endl;
-  }
-
-  // Add the __isset data member if we need it, using the definition from above
-  if (has_nonrequired_fields && (!pointers || read)) {
-    out <<
-      endl <<
-      indent() << "_" << tstruct->get_name() << "__isset __isset;" << endl;
-  }
-
-  // Create a setter function for each field
-  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-    if (pointers) {
-      continue;
-    }
-    out <<
-      endl <<
-      indent() << "void __set_" << (*m_iter)->get_name() <<
-        "(" << type_name((*m_iter)->get_type(), false, true);
-    out << " val) {" << endl << indent() <<
-      indent() << (*m_iter)->get_name() << " = val;" << endl;
-
-    // assume all fields are required except optional fields.
-    // for optional fields change __isset.name to true
-    bool is_optional = (*m_iter)->get_req() == t_field::T_OPTIONAL;
-    if (is_optional) {
-      out <<
-        indent() <<
-        indent() << "__isset." << (*m_iter)->get_name() << " = true;" << endl;
-    }
-    out <<
-      indent()<< "}" << endl;
-  }
-  out << endl;
-
-  if (!pointers) {
-    // Should we generate default operators?
-    if (!gen_no_default_operators_) {
-      // Generate an equality testing operator.  Make it inline since the compiler
-      // will do a better job than we would when deciding whether to inline it.
-      out <<
-        indent() << "bool operator == (const " << tstruct->get_name() << " & " <<
-        (members.size() > 0 ? "rhs" : "/* rhs */") << ") const" << endl;
-      scope_up(out);
-      for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-        // Most existing Thrift code does not use isset or optional/required,
-        // so we treat "default" fields as required.
-        if ((*m_iter)->get_req() != t_field::T_OPTIONAL) {
-          out <<
-            indent() << "if (!(" << (*m_iter)->get_name()
-                     << " == rhs." << (*m_iter)->get_name() << "))" << endl <<
-            indent() << "  return false;" << endl;
-        } else {
-          out <<
-            indent() << "if (__isset." << (*m_iter)->get_name()
-                     << " != rhs.__isset." << (*m_iter)->get_name() << ")" << endl <<
-            indent() << "  return false;" << endl <<
-            indent() << "else if (__isset." << (*m_iter)->get_name() << " && !("
-                     << (*m_iter)->get_name() << " == rhs." << (*m_iter)->get_name()
-                     << "))" << endl <<
-            indent() << "  return false;" << endl;
-        }
-      }
-      indent(out) << "return true;" << endl;
-      scope_down(out);
-      out <<
-        indent() << "bool operator != (const " << tstruct->get_name() << " &rhs) const {" << endl <<
-        indent() << "  return !(*this == rhs);" << endl <<
-        indent() << "}" << endl << endl;
-
-      // Generate the declaration of a less-than operator.  This must be
-      // implemented by the application developer if they wish to use it.  (They
-      // will get a link error if they try to use it without an implementation.)
-      out <<
-        indent() << "bool operator < (const "
-                 << tstruct->get_name() << " & ) const;" << endl << endl;
-    }
-  }
-
-  if (read) {
-    if (gen_templates_) {
-      out <<
-        indent() << "template <class Protocol_>" << endl <<
-        indent() << "uint32_t read(Protocol_* iprot);" << endl;
-    } else {
-      out <<
-        indent() << "uint32_t read(" <<
-        "::apache::thrift::protocol::TProtocol* iprot);" << endl;
-    }
-  }
-  if (write) {
-    if (gen_templates_) {
-      out <<
-        indent() << "template <class Protocol_>" << endl <<
-        indent() << "uint32_t write(Protocol_* oprot) const;" << endl;
-    } else {
-      out <<
-        indent() << "uint32_t write(" <<
-        "::apache::thrift::protocol::TProtocol* oprot) const;" << endl;
-    }
-  }
-  out << endl;
-
-  indent_down();
-  indent(out) <<
-    "};" << endl <<
-    endl;
-
-  if (swap) {
-    // Generate a namespace-scope swap() function
-    out <<
-      indent() << "void swap(" << tstruct->get_name() << " &a, " <<
-      tstruct->get_name() << " &b);" << endl <<
-      endl;
-  }
+void t_rust_generator::generate_struct (t_struct *tstruct) {
+  f_types_ << "/* struct " << tstruct->get_name() << " */" << endl;
+  generate_object(tstruct);
 }
 
 /**
- * Writes the fingerprint of a struct to either the header or implementation.
- *
- * @param out Output stream
- * @param tstruct The struct
+ * Generate C code to represent Thrift services.  Creates a new GObject
+ * which can be used to access the service.
  */
-void t_rust_generator::generate_struct_fingerprint(ofstream& out,
-                                                  t_struct* tstruct,
-                                                  bool is_definition) {
-  string stat, nspace, comment;
-  if (is_definition) {
-    stat = "";
-    nspace = tstruct->get_name() + "::";
-    comment = " ";
-  } else {
-    stat = "static ";
-    nspace = "";
-    comment = "; // ";
-  }
-
-  if (! tstruct->has_fingerprint()) {
-    tstruct->generate_fingerprint();  // lazy fingerprint generation
-  }
-  if (tstruct->has_fingerprint()) {
-    out <<
-      indent() << stat << "const char* " << nspace
-        << "ascii_fingerprint" << comment << "= \"" <<
-        tstruct->get_ascii_fingerprint() << "\";" << endl <<
-      indent() << stat << "const uint8_t " << nspace <<
-        "binary_fingerprint[" << t_type::fingerprint_len << "]" << comment << "= {";
-    const char* comma = "";
-    for (int i = 0; i < t_type::fingerprint_len; i++) {
-      out << comma << "0x" << t_struct::byte_to_hex(tstruct->get_binary_fingerprint()[i]);
-      comma = ",";
-    }
-    out << "};" << endl << endl;
-  }
-}
-
-/**
- * Writes the local reflection of a type (either declaration or definition).
- */
-void t_rust_generator::generate_local_reflection(std::ofstream& out,
-                                                t_type* ttype,
-                                                bool is_definition) {
-  if (!gen_dense_) {
-    return;
-  }
-  ttype = get_true_type(ttype);
-  string key = ttype->get_ascii_fingerprint() + (is_definition ? "-defn" : "-decl");
-  assert(ttype->has_fingerprint());  // test AFTER get due to lazy fingerprint generation
-
-  // Note that we have generated this fingerprint.  If we already did, bail out.
-  if (!reflected_fingerprints_.insert(key).second) {
-    return;
-  }
-  // Let each program handle its own structures.
-  if (ttype->get_program() != NULL && ttype->get_program() != program_) {
-    return;
-  }
-
-  // Do dependencies.
-  if (ttype->is_list()) {
-    generate_local_reflection(out, ((t_list*)ttype)->get_elem_type(), is_definition);
-  } else if (ttype->is_set()) {
-    generate_local_reflection(out, ((t_set*)ttype)->get_elem_type(), is_definition);
-  } else if (ttype->is_map()) {
-    generate_local_reflection(out, ((t_map*)ttype)->get_key_type(), is_definition);
-    generate_local_reflection(out, ((t_map*)ttype)->get_val_type(), is_definition);
-  } else if (ttype->is_struct() || ttype->is_xception()) {
-    // Hacky hacky.  For efficiency and convenience, we need a dummy "T_STOP"
-    // type at the end of our typespec array.  Unfortunately, there is no
-    // T_STOP type, so we use the global void type, and special case it when
-    // generating its typespec.
-
-    const vector<t_field*>& members = ((t_struct*)ttype)->get_sorted_members();
-    vector<t_field*>::const_iterator m_iter;
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      generate_local_reflection(out, (**m_iter).get_type(), is_definition);
-    }
-    generate_local_reflection(out, g_type_void, is_definition);
-
-    // For definitions of structures, do the arrays of metas and field specs also.
-    if (is_definition) {
-      out <<
-        indent() << "::apache::thrift::reflection::local::FieldMeta" << endl <<
-        indent() << local_reflection_name("metas", ttype) <<"[] = {" << endl;
-      indent_up();
-      for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-        indent(out) << "{ " << (*m_iter)->get_key() << ", " <<
-          (((*m_iter)->get_req() == t_field::T_OPTIONAL) ? "true" : "false") <<
-          " }," << endl;
-      }
-      // Zero for the T_STOP marker.
-      indent(out) << "{ 0, false }" << endl << "};" << endl;
-      indent_down();
-
-      out <<
-        indent() << "::apache::thrift::reflection::local::TypeSpec*" << endl <<
-        indent() << local_reflection_name("specs", ttype) <<"[] = {" << endl;
-      indent_up();
-      for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-        indent(out) << "&" <<
-          local_reflection_name("typespec", (*m_iter)->get_type(), true) << "," << endl;
-      }
-      indent(out) << "&" <<
-        local_reflection_name("typespec", g_type_void) << "," << endl;
-      indent_down();
-      indent(out) << "};" << endl;
-    }
-  }
-
-  out <<
-    indent() << "// " << ttype->get_fingerprint_material() << endl <<
-    indent() << (is_definition ? "" : "extern ") <<
-      "::apache::thrift::reflection::local::TypeSpec" << endl <<
-      local_reflection_name("typespec", ttype) <<
-      (is_definition ? "(" : ";") << endl;
-
-  if (!is_definition) {
-    out << endl;
-    return;
-  }
-
-  indent_up();
-
-  if (ttype->is_void()) {
-    indent(out) << "::apache::thrift::protocol::T_STOP";
-  } else {
-    indent(out) << type_to_enum(ttype);
-  }
-
-  if (ttype->is_struct()) {
-    out << "," << endl <<
-      indent() << type_name(ttype) << "::binary_fingerprint," << endl <<
-      indent() << local_reflection_name("metas", ttype) << "," << endl <<
-      indent() << local_reflection_name("specs", ttype);
-  } else if (ttype->is_list()) {
-    out << "," << endl <<
-      indent() << "&" << local_reflection_name("typespec", ((t_list*)ttype)->get_elem_type(), true) << "," << endl <<
-      indent() << "NULL";
-  } else if (ttype->is_set()) {
-    out << "," << endl <<
-      indent() << "&" << local_reflection_name("typespec", ((t_set*)ttype)->get_elem_type(), true) << "," << endl <<
-      indent() << "NULL";
-  } else if (ttype->is_map()) {
-    out << "," << endl <<
-      indent() << "&" << local_reflection_name("typespec", ((t_map*)ttype)->get_key_type(), true) << "," << endl <<
-      indent() << "&" << local_reflection_name("typespec", ((t_map*)ttype)->get_val_type(), true);
-  }
-
-  out << ");" << endl << endl;
-
-  indent_down();
-}
-
-/**
- * Writes the structure's static pointer to its local reflection typespec
- * into the implementation file.
- */
-void t_rust_generator::generate_local_reflection_pointer(std::ofstream& out,
-                                                        t_type* ttype) {
-  if (!gen_dense_) {
-    return;
-  }
-  indent(out) <<
-    "::apache::thrift::reflection::local::TypeSpec* " <<
-      ttype->get_name() << "::local_reflection = " << endl <<
-    indent() << "  &" << local_reflection_name("typespec", ttype) << ";" <<
-    endl << endl;
-}
-
-/**
- * Makes a helper function to gen a struct reader.
- *
- * @param out Stream to write to
- * @param tstruct The struct
- */
-void t_rust_generator::generate_struct_reader(ofstream& out,
-                                             t_struct* tstruct,
-                                             bool pointers) {
-  if (gen_templates_) {
-    out <<
-      indent() << "template <class Protocol_>" << endl <<
-      indent() << "uint32_t " << tstruct->get_name() <<
-      "::read(Protocol_* iprot) {" << endl;
-  } else {
-    indent(out) <<
-      "uint32_t " << tstruct->get_name() <<
-      "::read(::apache::thrift::protocol::TProtocol* iprot) {" << endl;
-  }
-  indent_up();
-
-  const vector<t_field*>& fields = tstruct->get_members();
-  vector<t_field*>::const_iterator f_iter;
-
-  // Declare stack tmp variables
-  out <<
-    endl <<
-    indent() << "uint32_t xfer = 0;" << endl <<
-    indent() << "std::string fname;" << endl <<
-    indent() << "::apache::thrift::protocol::TType ftype;" << endl <<
-    indent() << "int16_t fid;" << endl <<
-    endl <<
-    indent() << "xfer += iprot->readStructBegin(fname);" << endl <<
-    endl <<
-    indent() << "using ::apache::thrift::protocol::TProtocolException;" << endl <<
-    endl;
-
-  // Required variables aren't in __isset, so we need tmp vars to check them.
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    if ((*f_iter)->get_req() == t_field::T_REQUIRED)
-      indent(out) << "bool isset_" << (*f_iter)->get_name() << " = false;" << endl;
-  }
-  out << endl;
-
-
-  // Loop over reading in fields
-  indent(out) <<
-    "while (true)" << endl;
-    scope_up(out);
-
-    // Read beginning field marker
-    indent(out) <<
-      "xfer += iprot->readFieldBegin(fname, ftype, fid);" << endl;
-
-    // Check for field STOP marker
-    out <<
-      indent() << "if (ftype == ::apache::thrift::protocol::T_STOP) {" << endl <<
-      indent() << "  break;" << endl <<
-      indent() << "}" << endl;
-
-    if(fields.empty()) {
-      out <<
-        indent() << "xfer += iprot->skip(ftype);" << endl;
-    }
-    else {
-      // Switch statement on the field we are reading
-      indent(out) <<
-        "switch (fid)" << endl;
-
-        scope_up(out);
-
-        // Generate deserialization code for known cases
-        for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-          indent(out) <<
-            "case " << (*f_iter)->get_key() << ":" << endl;
-          indent_up();
-          indent(out) <<
-            "if (ftype == " << type_to_enum((*f_iter)->get_type()) << ") {" << endl;
-          indent_up();
-
-          const char *isset_prefix =
-            ((*f_iter)->get_req() != t_field::T_REQUIRED) ? "this->__isset." : "isset_";
-
-#if 0
-          // This code throws an exception if the same field is encountered twice.
-          // We've decided to leave it out for performance reasons.
-          // TODO(dreiss): Generate this code and "if" it out to make it easier
-          // for people recompiling thrift to include it.
-          out <<
-            indent() << "if (" << isset_prefix << (*f_iter)->get_name() << ")" << endl <<
-            indent() << "  throw TProtocolException(TProtocolException::INVALID_DATA);" << endl;
-#endif
-
-          if (pointers && !(*f_iter)->get_type()->is_xception()) {
-            generate_deserialize_field(out, *f_iter, "(*(this->", "))");
-          } else {
-            generate_deserialize_field(out, *f_iter, "this->");
-          }
-          out <<
-            indent() << isset_prefix << (*f_iter)->get_name() << " = true;" << endl;
-          indent_down();
-          out <<
-            indent() << "} else {" << endl <<
-            indent() << "  xfer += iprot->skip(ftype);" << endl <<
-            // TODO(dreiss): Make this an option when thrift structs
-            // have a common base class.
-            // indent() << "  throw TProtocolException(TProtocolException::INVALID_DATA);" << endl <<
-            indent() << "}" << endl <<
-            indent() << "break;" << endl;
-          indent_down();
-      }
-
-      // In the default case we skip the field
-      out <<
-        indent() << "default:" << endl <<
-        indent() << "  xfer += iprot->skip(ftype);" << endl <<
-        indent() << "  break;" << endl;
-
-      scope_down(out);
-    } //!fields.empty()
-    // Read field end marker
-    indent(out) <<
-      "xfer += iprot->readFieldEnd();" << endl;
-
-    scope_down(out);
-
-  out <<
-    endl <<
-    indent() << "xfer += iprot->readStructEnd();" << endl;
-
-  // Throw if any required fields are missing.
-  // We do this after reading the struct end so that
-  // there might possibly be a chance of continuing.
-  out << endl;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    if ((*f_iter)->get_req() == t_field::T_REQUIRED)
-      out <<
-        indent() << "if (!isset_" << (*f_iter)->get_name() << ')' << endl <<
-        indent() << "  throw TProtocolException(TProtocolException::INVALID_DATA);" << endl;
-  }
-
-  indent(out) << "return xfer;" << endl;
-
-  indent_down();
-  indent(out) <<
-    "}" << endl << endl;
-}
-
-/**
- * Generates the write function.
- *
- * @param out Stream to write to
- * @param tstruct The struct
- */
-void t_rust_generator::generate_struct_writer(ofstream& out,
-                                             t_struct* tstruct,
-                                             bool pointers) {
-  string name = tstruct->get_name();
-  const vector<t_field*>& fields = tstruct->get_sorted_members();
-  vector<t_field*>::const_iterator f_iter;
-
-  if (gen_templates_) {
-    out <<
-      indent() << "template <class Protocol_>" << endl <<
-      indent() << "uint32_t " << tstruct->get_name() <<
-      "::write(Protocol_* oprot) const {" << endl;
-  } else {
-    indent(out) <<
-      "uint32_t " << tstruct->get_name() <<
-      "::write(::apache::thrift::protocol::TProtocol* oprot) const {" << endl;
-  }
-  indent_up();
-
-  out <<
-    indent() << "uint32_t xfer = 0;" << endl;
-
-  indent(out) <<
-    "xfer += oprot->writeStructBegin(\"" << name << "\");" << endl;
-
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    bool check_if_set = (*f_iter)->get_req() == t_field::T_OPTIONAL ||
-                        (*f_iter)->get_type()->is_xception();
-    if (check_if_set) {
-      out << endl << indent() << "if (this->__isset." << (*f_iter)->get_name() << ") {" << endl;
-      indent_up();
-    } else {
-      out << endl;
-    }
-
-    // Write field header
-    out <<
-      indent() << "xfer += oprot->writeFieldBegin(" <<
-      "\"" << (*f_iter)->get_name() << "\", " <<
-      type_to_enum((*f_iter)->get_type()) << ", " <<
-      (*f_iter)->get_key() << ");" << endl;
-    // Write field contents
-    if (pointers && !(*f_iter)->get_type()->is_xception()) {
-      generate_serialize_field(out, *f_iter, "(*(this->", "))");
-    } else {
-      generate_serialize_field(out, *f_iter, "this->");
-    }
-    // Write field closer
-    indent(out) <<
-      "xfer += oprot->writeFieldEnd();" << endl;
-    if (check_if_set) {
-      indent_down();
-      indent(out) << '}';
-    }
-  }
-
-  out << endl;
-
-  // Write the struct map
-  out <<
-    indent() << "xfer += oprot->writeFieldStop();" << endl <<
-    indent() << "xfer += oprot->writeStructEnd();" << endl <<
-    indent() << "return xfer;" << endl;
-
-  indent_down();
-  indent(out) <<
-    "}" << endl <<
-    endl;
-}
-
-/**
- * Struct writer for result of a function, which can have only one of its
- * fields set and does a conditional if else look up into the __isset field
- * of the struct.
- *
- * @param out Output stream
- * @param tstruct The result struct
- */
-void t_rust_generator::generate_struct_result_writer(ofstream& out,
-                                                    t_struct* tstruct,
-                                                    bool pointers) {
-  string name = tstruct->get_name();
-  const vector<t_field*>& fields = tstruct->get_sorted_members();
-  vector<t_field*>::const_iterator f_iter;
-
-  if (gen_templates_) {
-    out <<
-      indent() << "template <class Protocol_>" << endl <<
-      indent() << "uint32_t " << tstruct->get_name() <<
-      "::write(Protocol_* oprot) const {" << endl;
-  } else {
-    indent(out) <<
-      "uint32_t " << tstruct->get_name() <<
-      "::write(::apache::thrift::protocol::TProtocol* oprot) const {" << endl;
-  }
-  indent_up();
-
-  out <<
-    endl <<
-    indent() << "uint32_t xfer = 0;" << endl <<
-    endl;
-
-  indent(out) <<
-    "xfer += oprot->writeStructBegin(\"" << name << "\");" << endl;
-
-  bool first = true;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    if (first) {
-      first = false;
-      out <<
-        endl <<
-        indent() << "if ";
-    } else {
-      out <<
-        " else if ";
-    }
-
-    out << "(this->__isset." << (*f_iter)->get_name() << ") {" << endl;
-
-    indent_up();
-
-    // Write field header
-    out <<
-      indent() << "xfer += oprot->writeFieldBegin(" <<
-      "\"" << (*f_iter)->get_name() << "\", " <<
-      type_to_enum((*f_iter)->get_type()) << ", " <<
-      (*f_iter)->get_key() << ");" << endl;
-    // Write field contents
-    if (pointers) {
-      generate_serialize_field(out, *f_iter, "(*(this->", "))");
-    } else {
-      generate_serialize_field(out, *f_iter, "this->");
-    }
-    // Write field closer
-    indent(out) << "xfer += oprot->writeFieldEnd();" << endl;
-
-    indent_down();
-    indent(out) << "}";
-  }
-
-  // Write the struct map
-  out <<
-    endl <<
-    indent() << "xfer += oprot->writeFieldStop();" << endl <<
-    indent() << "xfer += oprot->writeStructEnd();" << endl <<
-    indent() << "return xfer;" << endl;
-
-  indent_down();
-  indent(out) <<
-    "}" << endl <<
-    endl;
-}
-
-/**
- * Generates the swap function.
- *
- * @param out Stream to write to
- * @param tstruct The struct
- */
-void t_rust_generator::generate_struct_swap(ofstream& out, t_struct* tstruct) {
-  out <<
-    indent() << "void swap(" << tstruct->get_name() << " &a, " <<
-    tstruct->get_name() << " &b) {" << endl;
-  indent_up();
-
-  // Let argument-dependent name lookup find the correct swap() function to
-  // use based on the argument types.  If none is found in the arguments'
-  // namespaces, fall back to ::std::swap().
-  out <<
-    indent() << "using ::std::swap;" << endl;
-
-  bool has_nonrequired_fields = false;
-  const vector<t_field*>& fields = tstruct->get_members();
-  for (vector<t_field*>::const_iterator f_iter = fields.begin();
-       f_iter != fields.end();
-       ++f_iter) {
-    t_field *tfield = *f_iter;
-
-    if (tfield->get_req() != t_field::T_REQUIRED) {
-      has_nonrequired_fields = true;
-    }
-
-    out <<
-      indent() << "swap(a." << tfield->get_name() <<
-      ", b." << tfield->get_name() << ");" << endl;
-  }
-
-  if (has_nonrequired_fields) {
-    out <<
-      indent() << "swap(a.__isset, b.__isset);" << endl;
-  }
-
-  // handle empty structs
-  if (fields.size() == 0) {
-    out <<
-      indent() << "(void) a;" << endl;
-    out <<
-      indent() << "(void) b;" << endl;
-  }
-
-  scope_down(out);
-  out << endl;
-}
-
-/**
- * Generates a thrift service. In C++, this comprises an entirely separate
- * header and source file. The header file defines the methods and includes
- * the data types defined in the main header file, and the implementation
- * file contains implementations of the basic printer and default interfaces.
- *
- * @param tservice The service definition
- */
-void t_rust_generator::generate_service(t_service* tservice) {
-  string svcname = tservice->get_name();
-
-  // Make output files
-  string f_header_name = get_out_dir()+svcname+".h";
+void t_rust_generator::generate_service (t_service *tservice) {
+  string svcname_u = initial_caps_to_underscores(tservice->get_name());
+  string svcname_uc = this->nspace_uc + to_upper_case(svcname_u);
+  string filename = this->nspace_lc + to_lower_case(svcname_u);
+
+  // make output files
+  string f_header_name = get_out_dir() + filename + ".h";
   f_header_.open(f_header_name.c_str());
 
-  // Print header file includes
+  string program_name_u = initial_caps_to_underscores(program_name_);
+  string program_name_lc = to_lower_case(program_name_u);
+
+  // add header file boilerplate
   f_header_ <<
     autogen_comment();
-  f_header_ <<
-    "#ifndef " << svcname << "_H" << endl <<
-    "#define " << svcname << "_H" << endl <<
-    endl;
-  if (gen_cob_style_) {
-    f_header_ <<
-      "#include <thrift/transport/TBufferTransports.h>" << endl << // TMemoryBuffer
-      "#include <thrift/cxxfunctional.h>" << endl <<
-      "namespace apache { namespace thrift { namespace async {" << endl <<
-      "class TAsyncChannel;" << endl <<
-      "}}}" << endl;
-  }
-  f_header_ <<
-    "#include <thrift/TDispatchProcessor.h>" << endl;
-  if (gen_cob_style_) {
-    f_header_ <<
-      "#include <thrift/async/TAsyncDispatchProcessor.h>" << endl;
-  }
-  f_header_ <<
-    "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-    "_types.h\"" << endl;
 
-  t_service* extends_service = tservice->get_extends();
+  // add an inclusion guard
+  f_header_ <<
+    "#ifndef " << svcname_uc << "_H" << endl <<
+    "#define " << svcname_uc << "_H" << endl <<
+    endl;
+
+  // add standard includes
+  f_header_ <<
+    "#include \"" << this->nspace_lc << program_name_lc << "_types.h\"" << endl;
+
+  // if we are inheriting from another service, include its header
+  t_service *extends_service = tservice->get_extends();
   if (extends_service != NULL) {
     f_header_ <<
-      "#include \"" << get_include_prefix(*(extends_service->get_program())) <<
-      extends_service->get_name() << ".h\"" << endl;
+      "#include \"" << this->nspace_lc << to_lower_case(initial_caps_to_underscores(extends_service->get_name())) << ".h\"" << endl;
   }
+  f_header_ << endl;
 
-  f_header_ <<
-    endl <<
-    ns_open_ << endl <<
-    endl;
-
-  // Service implementation file includes
-  string f_service_name = get_out_dir()+svcname+".rs";
+  // create the service implementation
+  string f_service_name = get_out_dir() + filename + ".c";
   f_service_.open(f_service_name.c_str());
+
+  // add the boilerplace header
   f_service_ <<
     autogen_comment();
+
+  // include the headers
   f_service_ <<
-    "#include \"" << get_include_prefix(*get_program()) << svcname << ".h\"" << endl;
-  if (gen_cob_style_) {
-    f_service_ <<
-      "#include \"thrift/async/TAsyncChannel.h\"" << endl;
-  }
-  if (gen_templates_) {
-    f_service_ <<
-      "#include \"" << get_include_prefix(*get_program()) << svcname <<
-      ".tcc\"" << endl;
-
-    string f_service_tcc_name = get_out_dir()+svcname+".tcc";
-    f_service_tcc_.open(f_service_tcc_name.c_str());
-    f_service_tcc_ <<
-      autogen_comment();
-    f_service_tcc_ <<
-      "#include \"" << get_include_prefix(*get_program()) << svcname <<
-      ".h\"" << endl;
-
-    f_service_tcc_ <<
-      "#ifndef " << svcname << "_TCC" << endl <<
-      "#define " << svcname << "_TCC" << endl <<
-      endl;
-
-    if (gen_cob_style_) {
-      f_service_tcc_ <<
-        "#include \"thrift/async/TAsyncChannel.h\"" << endl;
-    }
-  }
-
-  f_service_ <<
-    endl << ns_open_ << endl << endl;
-  f_service_tcc_ <<
-    endl << ns_open_ << endl << endl;
-
-  // Generate all the components
-  generate_service_interface(tservice, "");
-  generate_service_interface_factory(tservice, "");
-  generate_service_null(tservice, "");
-  generate_service_helpers(tservice);
-  generate_service_client(tservice, "");
-  generate_service_processor(tservice, "");
-  generate_service_multiface(tservice);
-  generate_service_skeleton(tservice);
-
-  // Generate all the cob components
-  if (gen_cob_style_) {
-    generate_service_interface(tservice, "CobCl");
-    generate_service_interface(tservice, "CobSv");
-    generate_service_interface_factory(tservice, "CobSv");
-    generate_service_null(tservice, "CobSv");
-    generate_service_client(tservice, "Cob");
-    generate_service_processor(tservice, "Cob");
-    generate_service_async_skeleton(tservice);
-  }
-
-  // Close the namespace
-  f_service_ <<
-    ns_close_ << endl <<
+    "#include <string.h>" << endl <<
+    "#include <thrift/c_glib/thrift.h>" << endl <<
+    "#include <thrift/c_glib/thrift_application_exception.h>" << endl <<
+    "#include \"" << filename << ".h\"" << endl <<
     endl;
-  f_service_tcc_ <<
-    ns_close_ << endl <<
-    endl;
+
+  // generate the client objects
+  generate_service_client (tservice);
+
+  // generate the server objects
+  generate_service_server (tservice);
+
+  // end the header inclusion guard
   f_header_ <<
-    ns_close_ << endl <<
-    endl;
+    "#endif /* " << svcname_uc << "_H */" << endl;
 
-  // TODO(simpkins): Make this a separate option
-  if (gen_templates_) {
-    f_header_ <<
-      "#include \"" << get_include_prefix(*get_program()) << svcname <<
-      ".tcc\"" << endl <<
-      "#include \"" << get_include_prefix(*get_program()) << program_name_ <<
-      "_types.tcc\"" << endl <<
-      endl;
-  }
-
-  f_header_ <<
-    "#endif" << endl;
-  f_service_tcc_ <<
-    "#endif" << endl;
-
-  // Close the files
-  f_service_tcc_.close();
+  // close the files
   f_service_.close();
   f_header_.close();
 }
 
 /**
- * Generates helper functions for a service. Basically, this generates types
- * for all the arguments and results to functions.
  *
- * @param tservice The service to generate a header definition for
  */
-void t_rust_generator::generate_service_helpers(t_service* tservice) {
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-  std::ofstream& out = (gen_templates_ ? f_service_tcc_ : f_service_);
+void t_rust_generator::generate_xception (t_struct *tstruct) {
+  string name = tstruct->get_name();
+  string name_u = initial_caps_to_underscores(name);
+  string name_lc = to_lower_case(name_u);
+  string name_uc = to_upper_case(name_u);
 
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    t_struct* ts = (*f_iter)->get_arglist();
-    string name_orig = ts->get_name();
+  generate_object(tstruct);
 
-    // TODO(dreiss): Why is this stuff not in generate_function_helpers?
-    ts->set_name(tservice->get_name() + "_" + (*f_iter)->get_name() + "_args");
-    generate_struct_definition(f_header_, ts, false);
-    generate_struct_reader(out, ts);
-    generate_struct_writer(out, ts);
-    ts->set_name(tservice->get_name() + "_" + (*f_iter)->get_name() + "_pargs");
-    generate_struct_definition(f_header_, ts, false, true, false, true);
-    generate_struct_writer(out, ts, true);
-    ts->set_name(name_orig);
-
-    generate_function_helpers(tservice, *f_iter);
-  }
-}
-
-/**
- * Generates a service interface definition.
- *
- * @param tservice The service to generate a header definition for
- */
-void t_rust_generator::generate_service_interface(t_service* tservice, string style) {
-
-  string service_if_name = service_name_ + style + "If";
-  if (style == "CobCl") {
-    // Forward declare the client.
-    string client_name = service_name_ + "CobClient";
-    if (gen_templates_) {
-      client_name += "T";
-      service_if_name += "T";
-      indent(f_header_) <<
-        "template <class Protocol_>" << endl;
-    }
-    indent(f_header_) << "class " << client_name << ";" <<
-      endl << endl;
-  }
-
-  string extends = "";
-  if (tservice->get_extends() != NULL) {
-    extends = " : virtual public " + type_name(tservice->get_extends()) +
-      style + "If";
-    if (style == "CobCl" && gen_templates_) {
-      // TODO(simpkins): If gen_templates_ is enabled, we currently assume all
-      // parent services were also generated with templates enabled.
-      extends += "T<Protocol_>";
-    }
-  }
-
-  if (style == "CobCl" && gen_templates_) {
-    f_header_ << "template <class Protocol_>" << endl;
-  }
-  f_header_ <<
-    "class " << service_if_name << extends << " {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << "virtual ~" << service_if_name << "() {}" << endl;
-
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    f_header_ <<
-      indent() << "virtual " << function_signature(*f_iter, style) << " = 0;" << endl;
-  }
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-
-  if (style == "CobCl" && gen_templates_) {
-    // generate a backwards-compatible typedef for clients that do not
-    // know about the new template-style code
-    f_header_ <<
-      "typedef " << service_if_name <<
-      "< ::apache::thrift::protocol::TProtocol> " <<
-      service_name_ << style << "If;" <<
-      endl << endl;
-  }
-}
-
-/**
- * Generates a service interface factory.
- *
- * @param tservice The service to generate an interface factory for.
- */
-void t_rust_generator::generate_service_interface_factory(t_service* tservice,
-                                                         string style) {
-  string service_if_name = service_name_ + style + "If";
-
-  // Figure out the name of the upper-most parent class.
-  // Getting everything to work out properly with inheritance is annoying.
-  // Here's what we're doing for now:
-  //
-  // - All handlers implement getHandler(), but subclasses use covariant return
-  //   types to return their specific service interface class type.  We have to
-  //   use raw pointers because of this; shared_ptr<> can't be used for
-  //   covariant return types.
-  //
-  // - Since we're not using shared_ptr<>, we also provide a releaseHandler()
-  //   function that must be called to release a pointer to a handler obtained
-  //   via getHandler().
-  //
-  //   releaseHandler() always accepts a pointer to the upper-most parent class
-  //   type.  This is necessary since the parent versions of releaseHandler()
-  //   may accept any of the parent types, not just the most specific subclass
-  //   type.  Implementations can use dynamic_cast to cast the pointer to the
-  //   subclass type if desired.
-  t_service* base_service = tservice;
-  while (base_service->get_extends() != NULL) {
-    base_service = base_service->get_extends();
-  }
-  string base_if_name = type_name(base_service) + style + "If";
-
-  // Generate the abstract factory class
-  string factory_name = service_if_name + "Factory";
-  string extends;
-  if (tservice->get_extends() != NULL) {
-    extends = " : virtual public " + type_name(tservice->get_extends()) +
-      style + "IfFactory";
-  }
-
-  f_header_ <<
-    "class " << factory_name << extends << " {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << "typedef " << service_if_name << " Handler;" << endl <<
+  f_types_ << "/* exception */" << endl <<
+    "typedef enum" << endl <<
+    "{" << endl <<
+    "  " << this->nspace_uc << name_uc << "_ERROR_CODE," << endl <<
+    "} " << this->nspace << name << "Error;" << endl <<
     endl <<
-    indent() << "virtual ~" << factory_name << "() {}" << endl <<
+    "GQuark " << this->nspace_lc << name_lc << "_error_quark (void);" << endl <<
+    "#define " << this->nspace_uc << name_uc << "_ERROR (" <<
+      this->nspace_lc << name_lc << "_error_quark())" << endl <<
     endl <<
-    indent() << "virtual " << service_if_name << "* getHandler(" <<
-      "const ::apache::thrift::TConnectionInfo& connInfo) = 0;" <<
-    endl <<
-    indent() << "virtual void releaseHandler(" << base_if_name <<
-    "* /* handler */) = 0;" << endl;
-
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-
-  // Generate the singleton factory class
-  string singleton_factory_name = service_if_name + "SingletonFactory";
-  f_header_ <<
-    "class " << singleton_factory_name <<
-    " : virtual public " << factory_name << " {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << singleton_factory_name << "(const boost::shared_ptr<" <<
-    service_if_name << ">& iface) : iface_(iface) {}" << endl <<
-    indent() << "virtual ~" << singleton_factory_name << "() {}" << endl <<
-    endl <<
-    indent() << "virtual " << service_if_name << "* getHandler(" <<
-      "const ::apache::thrift::TConnectionInfo&) {" << endl <<
-    indent() << "  return iface_.get();" << endl <<
-    indent() << "}" << endl <<
-    indent() << "virtual void releaseHandler(" << base_if_name <<
-    "* /* handler */) {}" << endl;
-
-  f_header_ <<
-    endl <<
-    " protected:" << endl <<
-    indent() << "boost::shared_ptr<" << service_if_name << "> iface_;" << endl;
-
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-}
-
-/**
- * Generates a null implementation of the service.
- *
- * @param tservice The service to generate a header definition for
- */
-void t_rust_generator::generate_service_null(t_service* tservice, string style) {
-  string extends = "";
-  if (tservice->get_extends() != NULL) {
-    extends = " , virtual public " + type_name(tservice->get_extends()) + style + "Null";
-  }
-  f_header_ <<
-    "class " << service_name_ << style << "Null : virtual public " << service_name_ << style << "If" << extends << " {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << "virtual ~" << service_name_ << style << "Null() {}" << endl;
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    f_header_ <<
-      indent() << function_signature(*f_iter, style, "", false) << " {" << endl;
-    indent_up();
-
-    t_type* returntype = (*f_iter)->get_returntype();
-    t_field returnfield(returntype, "_return");
-
-    if (style == "") {
-      if (returntype->is_void() || is_complex_type(returntype)) {
-        f_header_ << indent() << "return;" << endl;
-      } else {
-        f_header_ <<
-          indent() << declare_field(&returnfield, true) << endl <<
-          indent() << "return _return;" << endl;
-      }
-    } else if (style == "CobSv") {
-      if (returntype->is_void()) {
-        f_header_ << indent() << "return cob();" << endl;
-    } else {
-      t_field returnfield(returntype, "_return");
-      f_header_ <<
-        indent() << declare_field(&returnfield, true) << endl <<
-        indent() << "return cob(_return);" << endl;
-    }
-
-    } else {
-      throw "UNKNOWN STYLE";
-    }
-
-    indent_down();
-    f_header_ <<
-      indent() << "}" << endl;
-  }
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-}
-
-void t_rust_generator::generate_function_call(ostream& out, t_function* tfunction, string target, string iface, string arg_prefix) {
-  bool first = true;
-  t_type* ret_type = get_true_type(tfunction->get_returntype());
-  out << indent();
-  if (!tfunction->is_oneway() && !ret_type->is_void()) {
-    if (is_complex_type(ret_type)) {
-      first = false;
-      out << iface << "->" << tfunction->get_name() << "(" << target;
-    } else {
-      out << target << " = " << iface << "->" << tfunction->get_name() << "(";
-    }
-  } else {
-    out << iface << "->" << tfunction->get_name() << "(";
-  }
-  const std::vector<t_field*>& fields = tfunction->get_arglist()->get_members();
-  vector<t_field*>::const_iterator f_iter;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    if (first) {
-      first = false;
-    } else {
-      out << ", ";
-    }
-    out << arg_prefix << (*f_iter)->get_name();
-  }
-  out << ");" << endl;
-}
-
-void t_rust_generator::generate_service_async_skeleton(t_service* tservice) {
-  string svcname = tservice->get_name();
-
-  // Service implementation file includes
-  string f_skeleton_name = get_out_dir()+svcname+"_async_server.skeleton.rs";
-
-  string ns = namespace_prefix(tservice->get_program()->get_namespace("rust"));
-
-  ofstream f_skeleton;
-  f_skeleton.open(f_skeleton_name.c_str());
-  f_skeleton <<
-    "// This autogenerated skeleton file illustrates one way to adapt a synchronous" << endl <<
-    "// interface into an asynchronous interface. You should copy it to another" << endl <<
-    "// filename to avoid overwriting it and rewrite as asynchronous any functions" << endl <<
-    "// that would otherwise introduce unwanted latency." << endl <<
-    endl <<
-    "#include \"" << get_include_prefix(*get_program()) << svcname << ".h\"" << endl <<
-    "#include <thrift/protocol/TBinaryProtocol.h>" << endl <<
-    endl <<
-    "using namespace ::apache::thrift;" << endl <<
-    "using namespace ::apache::thrift::protocol;" << endl <<
-    "using namespace ::apache::thrift::transport;" << endl <<
-    "using namespace ::apache::thrift::async;" << endl <<
-    endl <<
-    "using boost::shared_ptr;" << endl <<
     endl;
 
-  // the following code would not compile:
-  // using namespace ;
-  // using namespace ::;
-  if ( (!ns.empty()) && (ns.compare(" ::") != 0)) {
-    f_skeleton <<
-      "using namespace " << string(ns, 0, ns.size()-2) << ";" << endl <<
-      endl;
-  }
-
-  f_skeleton <<
-    "class " << svcname << "AsyncHandler : " <<
-    "public " << svcname << "CobSvIf {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_skeleton <<
-    indent() << svcname << "AsyncHandler() {" << endl <<
-    indent() << "  syncHandler_ = std::auto_ptr<" << svcname <<
-                "Handler>(new " << svcname << "Handler);" << endl <<
-    indent() << "  // Your initialization goes here" << endl <<
-    indent() << "}" << endl;
-  f_skeleton <<
-    indent() << "virtual ~" << service_name_ << "AsyncHandler();" << endl;
-
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    f_skeleton <<
-      endl <<
-      indent() << function_signature(*f_iter, "CobSv", "", true) << " {" << endl;
-    indent_up();
-
-    t_type* returntype = (*f_iter)->get_returntype();
-    t_field returnfield(returntype, "_return");
-
-    string target = returntype->is_void() ? "" : "_return";
-    if (!returntype->is_void()) {
-      f_skeleton <<
-        indent() << declare_field(&returnfield, true) << endl;
-    }
-    generate_function_call(f_skeleton, *f_iter, target, "syncHandler_", "");
-    f_skeleton << indent() << "return cob(" << target << ");" << endl;
-
-    scope_down(f_skeleton);
-  }
-  f_skeleton << endl <<
-    " protected:" << endl <<
-    indent() << "std::auto_ptr<" << svcname << "Handler> syncHandler_;" << endl;
-  indent_down();
-  f_skeleton <<
-    "};" << endl << endl;
-}
-
-/**
- * Generates a multiface, which is a single server that just takes a set
- * of objects implementing the interface and calls them all, returning the
- * value of the last one to be called.
- *
- * @param tservice The service to generate a multiserver for.
- */
-void t_rust_generator::generate_service_multiface(t_service* tservice) {
-  // Generate the dispatch methods
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-
-  string extends = "";
-  string extends_multiface = "";
-  if (tservice->get_extends() != NULL) {
-    extends = type_name(tservice->get_extends());
-    extends_multiface = ", public " + extends + "Multiface";
-  }
-
-  string list_type = string("std::vector<boost::shared_ptr<") + service_name_ + "If> >";
-
-  // Generate the header portion
-  f_header_ <<
-    "class " << service_name_ << "Multiface : " <<
-    "virtual public " << service_name_ << "If" <<
-    extends_multiface << " {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << service_name_ << "Multiface(" << list_type << "& ifaces) : ifaces_(ifaces) {" << endl;
-  if (!extends.empty()) {
-    f_header_ <<
-      indent() << "  std::vector<boost::shared_ptr<" + service_name_ + "If> >::iterator iter;" << endl <<
-      indent() << "  for (iter = ifaces.begin(); iter != ifaces.end(); ++iter) {" << endl <<
-      indent() << "    " << extends << "Multiface::add(*iter);" << endl <<
-      indent() << "  }" << endl;
-  }
-  f_header_ <<
-    indent() << "}" << endl <<
-    indent() << "virtual ~" << service_name_ << "Multiface() {}" << endl;
-  indent_down();
-
-  // Protected data members
-  f_header_ <<
-    " protected:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << list_type << " ifaces_;" << endl <<
-    indent() << service_name_ << "Multiface() {}" << endl <<
-    indent() << "void add(boost::shared_ptr<" << service_name_ << "If> iface) {" << endl;
-  if (!extends.empty()) {
-    f_header_ <<
-      indent() << "  " << extends << "Multiface::add(iface);" << endl;
-  }
-  f_header_ <<
-    indent() << "  ifaces_.push_back(iface);" << endl <<
-    indent() << "}" << endl;
-  indent_down();
-
-  f_header_ <<
-    indent() << " public:" << endl;
-  indent_up();
-
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    t_struct* arglist = (*f_iter)->get_arglist();
-    const vector<t_field*>& args = arglist->get_members();
-    vector<t_field*>::const_iterator a_iter;
-
-    string call = string("ifaces_[i]->") + (*f_iter)->get_name() + "(";
-    bool first = true;
-    if (is_complex_type((*f_iter)->get_returntype())) {
-      call += "_return";
-      first = false;
-    }
-    for (a_iter = args.begin(); a_iter != args.end(); ++a_iter) {
-      if (first) {
-        first = false;
-      } else {
-        call += ", ";
-      }
-      call += (*a_iter)->get_name();
-    }
-    call += ")";
-
-    f_header_ <<
-      indent() << function_signature(*f_iter, "") << " {" << endl;
-    indent_up();
-    f_header_ <<
-      indent() << "size_t sz = ifaces_.size();" << endl <<
-      indent() << "size_t i = 0;" << endl <<
-      indent() << "for (; i < (sz - 1); ++i) {" << endl;
-    indent_up();
-    f_header_ <<
-      indent() << call << ";" << endl;
-    indent_down();
-    f_header_ <<
-      indent() << "}" << endl;
-
-    if (!(*f_iter)->get_returntype()->is_void()) {
-      if (is_complex_type((*f_iter)->get_returntype())) {
-        f_header_ <<
-          indent() << call << ";" << endl <<
-          indent() << "return;" << endl;
-      } else {
-        f_header_ <<
-          indent() << "return " << call << ";" << endl;
-      }
-    } else {
-      f_header_ <<
-        indent() << call << ";" << endl;
-    }
-
-    indent_down();
-    f_header_ <<
-      indent() << "}" << endl <<
-      endl;
-  }
-
-  indent_down();
-  f_header_ <<
-    indent() << "};" << endl <<
-    endl;
-}
-
-/**
- * Generates a service client definition.
- *
- * @param tservice The service to generate a server for.
- */
-void t_rust_generator::generate_service_client(t_service* tservice, string style) {
-  string ifstyle;
-  if (style == "Cob") {
-    ifstyle = "CobCl";
-  }
-
-  std::ofstream& out = (gen_templates_ ? f_service_tcc_ : f_service_);
-  string template_header, template_suffix, short_suffix, protocol_type, _this;
-  string const prot_factory_type =
-    "::apache::thrift::protocol::TProtocolFactory";
-  if (gen_templates_) {
-    template_header = "template <class Protocol_>\n";
-    short_suffix = "T";
-    template_suffix = "T<Protocol_>";
-    protocol_type = "Protocol_";
-    _this = "this->";
-  } else {
-    protocol_type = "::apache::thrift::protocol::TProtocol";
-  }
-  string prot_ptr = "boost::shared_ptr< " + protocol_type + ">";
-  string client_suffix = "Client" + template_suffix;
-  string if_suffix = "If";
-  if (style == "Cob") {
-    if_suffix += template_suffix;
-  }
-
-  string extends = "";
-  string extends_client = "";
-  if (tservice->get_extends() != NULL) {
-    // TODO(simpkins): If gen_templates_ is enabled, we currently assume all
-    // parent services were also generated with templates enabled.
-    extends = type_name(tservice->get_extends());
-    extends_client = ", public " + extends + style + client_suffix;
-  }
-
-  // Generate the header portion
-  f_header_ <<
-    template_header <<
-    "class " << service_name_ << style << "Client" << short_suffix << " : " <<
-    "virtual public " << service_name_ << ifstyle << if_suffix <<
-    extends_client << " {" << endl <<
-    " public:" << endl;
-
-  indent_up();
-  if (style != "Cob") {
-    f_header_ <<
-      indent() << service_name_ << style << "Client" << short_suffix <<
-      "(" << prot_ptr << " prot) :" <<
-      endl;
-    if (extends.empty()) {
-      f_header_ <<
-        indent() << "  piprot_(prot)," << endl <<
-        indent() << "  poprot_(prot) {" << endl <<
-        indent() << "  iprot_ = prot.get();" << endl <<
-        indent() << "  oprot_ = prot.get();" << endl <<
-        indent() << "}" << endl;
-    } else {
-      f_header_ <<
-        indent() << "  " << extends << style << client_suffix <<
-        "(prot, prot) {}" << endl;
-    }
-
-    f_header_ <<
-      indent() << service_name_ << style << "Client" << short_suffix <<
-      "(" << prot_ptr << " iprot, " << prot_ptr << " oprot) :" << endl;
-    if (extends.empty()) {
-      f_header_ <<
-        indent() << "  piprot_(iprot)," << endl <<
-        indent() << "  poprot_(oprot) {" << endl <<
-        indent() << "  iprot_ = iprot.get();" << endl <<
-        indent() << "  oprot_ = oprot.get();" << endl <<
-        indent() << "}" << endl;
-    } else {
-      f_header_ <<
-        indent() << "  " << extends << style << client_suffix <<
-        "(iprot, oprot) {}" << endl;
-    }
-
-    // Generate getters for the protocols.
-    // Note that these are not currently templated for simplicity.
-    // TODO(simpkins): should they be templated?
-    f_header_ <<
-      indent() << "boost::shared_ptr< ::apache::thrift::protocol::TProtocol> getInputProtocol() {" << endl <<
-      indent() << "  return " << _this << "piprot_;" << endl <<
-      indent() << "}" << endl;
-
-    f_header_ <<
-      indent() << "boost::shared_ptr< ::apache::thrift::protocol::TProtocol> getOutputProtocol() {" << endl <<
-      indent() << "  return " << _this << "poprot_;" << endl <<
-      indent() << "}" << endl;
-
-  } else /* if (style == "Cob") */ {
-    f_header_ <<
-      indent() << service_name_ << style << "Client" << short_suffix << "(" <<
-      "boost::shared_ptr< ::apache::thrift::async::TAsyncChannel> channel, " <<
-      "::apache::thrift::protocol::TProtocolFactory* protocolFactory) :" <<
-      endl;
-    if (extends.empty()) {
-      f_header_ <<
-        indent() << "  channel_(channel)," << endl <<
-        indent() << "  itrans_(new ::apache::thrift::transport::TMemoryBuffer())," << endl <<
-        indent() << "  otrans_(new ::apache::thrift::transport::TMemoryBuffer())," << endl;
-      if (gen_templates_) {
-        // TProtocolFactory classes return generic TProtocol pointers.
-        // We have to dynamic cast to the Protocol_ type we are expecting.
-        f_header_ <<
-          indent() << "  piprot_(boost::dynamic_pointer_cast<Protocol_>(" <<
-          "protocolFactory->getProtocol(itrans_)))," << endl <<
-          indent() << "  poprot_(boost::dynamic_pointer_cast<Protocol_>(" <<
-          "protocolFactory->getProtocol(otrans_))) {" << endl;
-        // Throw a TException if either dynamic cast failed.
-        f_header_ <<
-          indent() << "  if (!piprot_ || !poprot_) {" << endl <<
-          indent() << "    throw ::apache::thrift::TException(\"" <<
-          "TProtocolFactory returned unexpected protocol type in " <<
-          service_name_ << style << "Client" << short_suffix <<
-          " constructor\");" << endl <<
-          indent() << "  }" << endl;
-      } else {
-        f_header_ <<
-          indent() << "  piprot_(protocolFactory->getProtocol(itrans_))," <<
-          endl <<
-          indent() << "  poprot_(protocolFactory->getProtocol(otrans_)) {" <<
-          endl;
-      }
-      f_header_ <<
-        indent() << "  iprot_ = piprot_.get();" << endl <<
-        indent() << "  oprot_ = poprot_.get();" << endl <<
-        indent() << "}" << endl;
-    } else {
-      f_header_ <<
-        indent() << "  " << extends << style << client_suffix <<
-        "(channel, protocolFactory) {}" << endl;
-    }
-  }
-
-  if (style == "Cob") {
-    f_header_ <<
-      indent() << "boost::shared_ptr< ::apache::thrift::async::TAsyncChannel> getChannel() {" << endl <<
-      indent() << "  return " << _this << "channel_;" << endl <<
-      indent() << "}" << endl;
-    if (!gen_no_client_completion_) {
-      f_header_ <<
-        indent() << "virtual void completed__(bool /* success */) {}" << endl;
-    }
-  }
-
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::const_iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    indent(f_header_) << function_signature(*f_iter, ifstyle) << ";" << endl;
-    // TODO(dreiss): Use private inheritance to avoid generating thise in cob-style.
-    t_function send_function(g_type_void,
-        string("send_") + (*f_iter)->get_name(),
-        (*f_iter)->get_arglist());
-    indent(f_header_) << function_signature(&send_function, "") << ";" << endl;
-    if (!(*f_iter)->is_oneway()) {
-      t_struct noargs(program_);
-      t_function recv_function((*f_iter)->get_returntype(),
-          string("recv_") + (*f_iter)->get_name(),
-          &noargs);
-      indent(f_header_) << function_signature(&recv_function, "") << ";" << endl;
-    }
-  }
-  indent_down();
-
-  if (extends.empty()) {
-    f_header_ <<
-      " protected:" << endl;
-    indent_up();
-
-    if (style == "Cob") {
-      f_header_ <<
-        indent() << "boost::shared_ptr< ::apache::thrift::async::TAsyncChannel> channel_;"  << endl <<
-        indent() << "boost::shared_ptr< ::apache::thrift::transport::TMemoryBuffer> itrans_;"  << endl <<
-        indent() << "boost::shared_ptr< ::apache::thrift::transport::TMemoryBuffer> otrans_;"  << endl;
-    }
-    f_header_ <<
-      indent() << prot_ptr << " piprot_;"  << endl <<
-      indent() << prot_ptr << " poprot_;"  << endl <<
-      indent() << protocol_type << "* iprot_;"  << endl <<
-      indent() << protocol_type << "* oprot_;"  << endl;
-
-    indent_down();
-  }
-
-  f_header_ <<
-    "};" << endl <<
-    endl;
-
-  if (gen_templates_) {
-    // Output a backwards compatibility typedef using
-    // TProtocol as the template parameter.
-    f_header_ <<
-      "typedef " << service_name_ << style <<
-      "ClientT< ::apache::thrift::protocol::TProtocol> " <<
-      service_name_ << style << "Client;" << endl <<
-      endl;
-  }
-
-  string scope = service_name_ + style + client_suffix + "::";
-
-  // Generate client method implementations
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    string funname = (*f_iter)->get_name();
-
-    // Open function
-    if (gen_templates_) {
-      indent(out) << template_header;
-    }
-    indent(out) <<
-      function_signature(*f_iter, ifstyle, scope) << endl;
-    scope_up(out);
-    indent(out) <<
-      "send_" << funname << "(";
-
-    // Get the struct of function call params
-    t_struct* arg_struct = (*f_iter)->get_arglist();
-
-    // Declare the function arguments
-    const vector<t_field*>& fields = arg_struct->get_members();
-    vector<t_field*>::const_iterator fld_iter;
-    bool first = true;
-    for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
-      if (first) {
-        first = false;
-      } else {
-        out << ", ";
-      }
-      out << (*fld_iter)->get_name();
-    }
-    out << ");" << endl;
-
-    if (style != "Cob") {
-      if (!(*f_iter)->is_oneway()) {
-        out << indent();
-        if (!(*f_iter)->get_returntype()->is_void()) {
-          if (is_complex_type((*f_iter)->get_returntype())) {
-            out << "recv_" << funname << "(_return);" << endl;
-          } else {
-            out << "return recv_" << funname << "();" << endl;
-          }
-        } else {
-          out <<
-            "recv_" << funname << "();" << endl;
-        }
-      }
-    } else {
-      if (!(*f_iter)->is_oneway()) {
-        out <<
-          indent() << _this << "channel_->sendAndRecvMessage(" <<
-          "tcxx::bind(cob, this), " << _this << "otrans_.get(), " <<
-          _this << "itrans_.get());" << endl;
-      } else {
-        out <<
-        indent() << _this << "channel_->sendMessage(" <<
-          "tcxx::bind(cob, this), " << _this << "otrans_.get());" << endl;
-      }
-    }
-    scope_down(out);
-    out << endl;
-
-    //if (style != "Cob") // TODO(dreiss): Libify the client and don't generate this for cob-style
-    if (true) {
-      // Function for sending
-      t_function send_function(g_type_void,
-                               string("send_") + (*f_iter)->get_name(),
-                               (*f_iter)->get_arglist());
-
-      // Open the send function
-      if (gen_templates_) {
-        indent(out) << template_header;
-      }
-      indent(out) <<
-        function_signature(&send_function, "", scope) << endl;
-      scope_up(out);
-
-      // Function arguments and results
-      string argsname = tservice->get_name() + "_" + (*f_iter)->get_name() + "_pargs";
-      string resultname = tservice->get_name() + "_" + (*f_iter)->get_name() + "_presult";
-
-      // Serialize the request
-      out <<
-        indent() << "int32_t cseqid = 0;" << endl <<
-        indent() << _this << "oprot_->writeMessageBegin(\"" <<
-        (*f_iter)->get_name() <<
-        "\", ::apache::thrift::protocol::T_CALL, cseqid);" << endl <<
-        endl <<
-        indent() << argsname << " args;" << endl;
-
-      for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
-        out <<
-          indent() << "args." << (*fld_iter)->get_name() << " = &" << (*fld_iter)->get_name() << ";" << endl;
-      }
-
-      out <<
-        indent() << "args.write(" << _this << "oprot_);" << endl <<
-        endl <<
-        indent() << _this << "oprot_->writeMessageEnd();" << endl <<
-        indent() << _this << "oprot_->getTransport()->writeEnd();" << endl <<
-        indent() << _this << "oprot_->getTransport()->flush();" << endl;
-
-      scope_down(out);
-      out << endl;
-
-      // Generate recv function only if not an oneway function
-      if (!(*f_iter)->is_oneway()) {
-        t_struct noargs(program_);
-        t_function recv_function((*f_iter)->get_returntype(),
-                                 string("recv_") + (*f_iter)->get_name(),
-                                 &noargs);
-        // Open the recv function
-        if (gen_templates_) {
-          indent(out) << template_header;
-        }
-        indent(out) <<
-          function_signature(&recv_function, "", scope) << endl;
-        scope_up(out);
-
-        out <<
-          endl <<
-          indent() << "int32_t rseqid = 0;" << endl <<
-          indent() << "std::string fname;" << endl <<
-          indent() << "::apache::thrift::protocol::TMessageType mtype;" << endl;
-        if (style == "Cob" && !gen_no_client_completion_) {
-          out <<
-            indent() << "bool completed = false;" << endl << endl <<
-            indent() << "try {";
-          indent_up();
-        }
-        out << endl <<
-          indent() << _this << "iprot_->readMessageBegin(fname, mtype, rseqid);" << endl <<
-          indent() << "if (mtype == ::apache::thrift::protocol::T_EXCEPTION) {" << endl <<
-          indent() << "  ::apache::thrift::TApplicationException x;" << endl <<
-          indent() << "  x.read(" << _this << "iprot_);" << endl <<
-          indent() << "  " << _this << "iprot_->readMessageEnd();" << endl <<
-          indent() << "  " << _this << "iprot_->getTransport()->readEnd();" <<
-          endl;
-        if (style == "Cob" && !gen_no_client_completion_) {
-          out <<
-            indent() << "  completed = true;" << endl <<
-            indent() << "  completed__(true);" << endl;
-        }
-        out <<
-          indent() << "  throw x;" << endl <<
-          indent() << "}" << endl <<
-          indent() << "if (mtype != ::apache::thrift::protocol::T_REPLY) {" << endl <<
-          indent() << "  " << _this << "iprot_->skip(" <<
-          "::apache::thrift::protocol::T_STRUCT);" << endl <<
-          indent() << "  " << _this << "iprot_->readMessageEnd();" << endl <<
-          indent() << "  " << _this << "iprot_->getTransport()->readEnd();" <<
-          endl;
-        if (style == "Cob" && !gen_no_client_completion_) {
-          out <<
-            indent() << "  completed = true;" << endl <<
-            indent() << "  completed__(false);" << endl;
-        }
-        out <<
-          indent() << "}" << endl <<
-          indent() << "if (fname.compare(\"" << (*f_iter)->get_name() << "\") != 0) {" << endl <<
-          indent() << "  " << _this << "iprot_->skip(" <<
-          "::apache::thrift::protocol::T_STRUCT);" << endl <<
-          indent() << "  " << _this << "iprot_->readMessageEnd();" << endl <<
-          indent() << "  " << _this << "iprot_->getTransport()->readEnd();" <<
-          endl;
-        if (style == "Cob" && !gen_no_client_completion_) {
-          out <<
-            indent() << "  completed = true;" << endl <<
-            indent() << "  completed__(false);" << endl;
-        }
-        out <<
-          indent() << "}" << endl;
-
-        if (!(*f_iter)->get_returntype()->is_void() &&
-            !is_complex_type((*f_iter)->get_returntype())) {
-          t_field returnfield((*f_iter)->get_returntype(), "_return");
-          out <<
-            indent() << declare_field(&returnfield) << endl;
-        }
-
-        out <<
-          indent() << resultname << " result;" << endl;
-
-        if (!(*f_iter)->get_returntype()->is_void()) {
-          out <<
-            indent() << "result.success = &_return;" << endl;
-        }
-
-        out <<
-          indent() << "result.read(" << _this << "iprot_);" << endl <<
-          indent() << _this << "iprot_->readMessageEnd();" << endl <<
-          indent() << _this << "iprot_->getTransport()->readEnd();" << endl <<
-          endl;
-
-        // Careful, only look for _result if not a void function
-        if (!(*f_iter)->get_returntype()->is_void()) {
-          if (is_complex_type((*f_iter)->get_returntype())) {
-            out <<
-              indent() << "if (result.__isset.success) {" << endl <<
-              indent() << "  // _return pointer has now been filled" << endl;
-            if (style == "Cob" && !gen_no_client_completion_) {
-              out <<
-                indent() << "  completed = true;" << endl <<
-                indent() << "  completed__(true);" << endl;
-            }
-            out <<
-              indent() << "  return;" << endl <<
-              indent() << "}" << endl;
-          } else {
-            out <<
-              indent() << "if (result.__isset.success) {" << endl;
-            if (style == "Cob" && !gen_no_client_completion_) {
-              out <<
-                indent() << "  completed = true;" << endl <<
-                indent() << "  completed__(true);" << endl;
-            }
-            out <<
-              indent() << "  return _return;" << endl <<
-              indent() << "}" << endl;
-          }
-        }
-
-        t_struct* xs = (*f_iter)->get_xceptions();
-        const std::vector<t_field*>& xceptions = xs->get_members();
-        vector<t_field*>::const_iterator x_iter;
-        for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
-          out <<
-            indent() << "if (result.__isset." << (*x_iter)->get_name() << ") {" << endl;
-          if (style == "Cob" && !gen_no_client_completion_) {
-            out <<
-              indent() << "  completed = true;" << endl <<
-              indent() << "  completed__(true);" << endl;
-          }
-          out  <<
-            indent() << "  throw result." << (*x_iter)->get_name() << ";" << endl <<
-            indent() << "}" << endl;
-        }
-
-        // We only get here if we are a void function
-        if ((*f_iter)->get_returntype()->is_void()) {
-          if (style == "Cob" && !gen_no_client_completion_) {
-            out <<
-              indent() << "completed = true;" << endl <<
-              indent() << "completed__(true);" << endl;
-          }
-          indent(out) <<
-            "return;" << endl;
-        } else {
-          if (style == "Cob" && !gen_no_client_completion_) {
-            out <<
-              indent() << "completed = true;" << endl <<
-              indent() << "completed__(true);" << endl;
-          }
-          out <<
-            indent() << "throw ::apache::thrift::TApplicationException(::apache::thrift::TApplicationException::MISSING_RESULT, \"" << (*f_iter)->get_name() << " failed: unknown result\");" << endl;
-        }
-        if (style == "Cob" && !gen_no_client_completion_) {
-          indent_down();
-          out <<
-            indent() << "} catch (...) {" << endl <<
-            indent() << "  if (!completed) {" << endl <<
-            indent() << "    completed__(false);" << endl <<
-            indent() << "  }" << endl <<
-            indent() << "  throw;" << endl <<
-            indent() << "}" << endl;
-        }
-        // Close function
-        scope_down(out);
-        out << endl;
-      }
-    }
-  }
-}
-
-class RustProcessorGenerator {
- public:
-  RustProcessorGenerator(t_rust_generator* generator, t_service* service,
-                     const string& style);
-
-  void run() {
-    generate_class_definition();
-
-    // Generate the dispatchCall() function
-    generate_dispatch_call(false);
-    if (generator_->gen_templates_) {
-      generate_dispatch_call(true);
-    }
-
-    // Generate all of the process subfunctions
-    generate_process_functions();
-
-    generate_factory();
-  }
-
-  void generate_class_definition();
-  void generate_dispatch_call(bool template_protocol);
-  void generate_process_functions();
-  void generate_factory();
-
- protected:
-  std::string type_name(t_type* ttype, bool in_typedef=false, bool arg=false) {
-    return generator_->type_name(ttype, in_typedef, arg);
-  }
-
-  std::string indent() {
-    return generator_->indent();
-  }
-  std::ostream& indent(std::ostream &os) {
-    return generator_->indent(os);
-  }
-
-  void indent_up() {
-    generator_->indent_up();
-  }
-  void indent_down() {
-    generator_->indent_down();
-  }
-
-  t_rust_generator* generator_;
-  t_service* service_;
-  std::ofstream& f_header_;
-  std::ofstream& f_out_;
-  string service_name_;
-  string style_;
-  string pstyle_;
-  string class_name_;
-  string if_name_;
-  string factory_class_name_;
-  string finish_cob_;
-  string finish_cob_decl_;
-  string ret_type_;
-  string call_context_;
-  string cob_arg_;
-  string call_context_arg_;
-  string call_context_decl_;
-  string template_header_;
-  string template_suffix_;
-  string typename_str_;
-  string class_suffix_;
-  string extends_;
-};
-
-RustProcessorGenerator::RustProcessorGenerator(t_rust_generator* generator,
-                                       t_service* service,
-                                       const string& style)
-  : generator_(generator),
-    service_(service),
-    f_header_(generator->f_header_),
-    f_out_(generator->gen_templates_ ?
-           generator->f_service_tcc_ : generator->f_service_),
-    service_name_(generator->service_name_),
-    style_(style) {
-  if (style_ == "Cob") {
-    pstyle_ = "Async";
-    class_name_ = service_name_ + pstyle_ + "Processor";
-    if_name_ = service_name_ + "CobSvIf";
-
-    finish_cob_ = "tcxx::function<void(bool ok)> cob, ";
-    finish_cob_decl_ = "tcxx::function<void(bool ok)>, ";
-    cob_arg_ = "cob, ";
-    ret_type_ = "void ";
-  } else {
-    class_name_ = service_name_ + "Processor";
-    if_name_ = service_name_ + "If";
-
-    ret_type_ = "bool ";
-    // TODO(edhall) callContext should eventually be added to TAsyncProcessor
-    call_context_ = ", void* callContext";
-    call_context_arg_ = ", callContext";
-    call_context_decl_ = ", void*";
-  }
-
-  factory_class_name_ = class_name_ + "Factory";
-
-  if (generator->gen_templates_) {
-    template_header_ = "template <class Protocol_>\n";
-    template_suffix_ = "<Protocol_>";
-    typename_str_ = "typename ";
-    class_name_ += "T";
-    factory_class_name_ += "T";
-  }
-
-  if (service_->get_extends() != NULL) {
-    extends_ = type_name(service_->get_extends()) + pstyle_ + "Processor";
-    if (generator_->gen_templates_) {
-      // TODO(simpkins): If gen_templates_ is enabled, we currently assume all
-      // parent services were also generated with templates enabled.
-      extends_ += "T<Protocol_>";
-    }
-  }
-}
-
-void RustProcessorGenerator::generate_class_definition() {
-  // Generate the dispatch methods
-  vector<t_function*> functions = service_->get_functions();
-  vector<t_function*>::iterator f_iter;
-
-  string parent_class;
-  if (service_->get_extends() != NULL) {
-    parent_class = extends_;
-  } else {
-    if (style_ == "Cob") {
-      parent_class = "::apache::thrift::async::TAsyncDispatchProcessor";
-    } else {
-      parent_class = "::apache::thrift::TDispatchProcessor";
-    }
-
-    if (generator_->gen_templates_) {
-      parent_class += "T<Protocol_>";
-    }
-  }
-
-  // Generate the header portion
-  f_header_ <<
-    template_header_ <<
-    "class " << class_name_ << " : public " << parent_class << " {" << endl;
-
-  // Protected data members
-  f_header_ <<
-    " protected:" << endl;
-  indent_up();
-  f_header_ <<
-    indent() << "boost::shared_ptr<" << if_name_ << "> iface_;" << endl;
-  f_header_ <<
-    indent() << "virtual " << ret_type_ << "dispatchCall(" << finish_cob_ <<
-      "::apache::thrift::protocol::TProtocol* iprot, " <<
-      "::apache::thrift::protocol::TProtocol* oprot, " <<
-      "const std::string& fname, int32_t seqid" << call_context_ << ");" <<
-      endl;
-  if (generator_->gen_templates_) {
-    f_header_ <<
-      indent() << "virtual " << ret_type_ << "dispatchCallTemplated(" <<
-        finish_cob_ << "Protocol_* iprot, Protocol_* oprot, " <<
-        "const std::string& fname, int32_t seqid" << call_context_ << ");" <<
-        endl;
-  }
-  indent_down();
-
-  // Process function declarations
-  f_header_ <<
-    " private:" << endl;
-  indent_up();
-
-  // Declare processMap_
-  f_header_ <<
-    indent() << "typedef  void (" << class_name_ << "::*" <<
-      "ProcessFunction)(" << finish_cob_decl_ << "int32_t, " <<
-      "::apache::thrift::protocol::TProtocol*, " <<
-      "::apache::thrift::protocol::TProtocol*" << call_context_decl_ << ");" <<
-      endl;
-  if (generator_->gen_templates_) {
-    f_header_ <<
-      indent() << "typedef void (" << class_name_ << "::*" <<
-        "SpecializedProcessFunction)(" << finish_cob_decl_ << "int32_t, " <<
-        "Protocol_*, Protocol_*" << call_context_decl_ << ");" <<
-        endl <<
-      indent() << "struct ProcessFunctions {" << endl <<
-      indent() << "  ProcessFunction generic;" << endl <<
-      indent() << "  SpecializedProcessFunction specialized;" << endl <<
-      indent() << "  ProcessFunctions(ProcessFunction g, " <<
-        "SpecializedProcessFunction s) :" << endl <<
-      indent() << "    generic(g)," << endl <<
-      indent() << "    specialized(s) {}" << endl <<
-      indent() << "  ProcessFunctions() : generic(NULL), specialized(NULL) " <<
-        "{}" << endl <<
-      indent() << "};" << endl <<
-      indent() << "typedef std::map<std::string, ProcessFunctions> " <<
-        "ProcessMap;" << endl;
-  } else {
-    f_header_ <<
-      indent() << "typedef std::map<std::string, ProcessFunction> " <<
-        "ProcessMap;" << endl;
-  }
-  f_header_ <<
-    indent() << "ProcessMap processMap_;" << endl;
-
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    indent(f_header_) <<
-      "void process_" << (*f_iter)->get_name() << "(" << finish_cob_ << "int32_t seqid, ::apache::thrift::protocol::TProtocol* iprot, ::apache::thrift::protocol::TProtocol* oprot" << call_context_ << ");" << endl;
-    if (generator_->gen_templates_) {
-      indent(f_header_) <<
-        "void process_" << (*f_iter)->get_name() << "(" << finish_cob_ <<
-        "int32_t seqid, Protocol_* iprot, Protocol_* oprot" <<
-        call_context_ << ");" << endl;
-    }
-    if (style_ == "Cob") {
-      // XXX Factor this out, even if it is a pain.
-      string ret_arg = ((*f_iter)->get_returntype()->is_void()
-                        ? ""
-                        : ", const " + type_name((*f_iter)->get_returntype()) + "& _return");
-      f_header_ <<
-        indent() << "void return_" << (*f_iter)->get_name() <<
-        "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-        "::apache::thrift::protocol::TProtocol* oprot, " <<
-        "void* ctx" << ret_arg << ");" << endl;
-      if (generator_->gen_templates_) {
-        f_header_ <<
-          indent() << "void return_" << (*f_iter)->get_name() <<
-          "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-          "Protocol_* oprot, void* ctx" << ret_arg << ");" << endl;
-      }
-      // XXX Don't declare throw if it doesn't exist
-      f_header_ <<
-        indent() << "void throw_" << (*f_iter)->get_name() <<
-        "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-        "::apache::thrift::protocol::TProtocol* oprot, void* ctx, " <<
-        "::apache::thrift::TDelayedException* _throw);" << endl;
-      if (generator_->gen_templates_) {
-        f_header_ <<
-          indent() << "void throw_" << (*f_iter)->get_name() <<
-          "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-          "Protocol_* oprot, void* ctx, " <<
-          "::apache::thrift::TDelayedException* _throw);" << endl;
-      }
-    }
-  }
-
-  f_header_ <<
-    " public:" << endl <<
-    indent() << class_name_ <<
-    "(boost::shared_ptr<" << if_name_ << "> iface) :" << endl;
-  if (!extends_.empty()) {
-    f_header_ <<
-      indent() << "  " << extends_ << "(iface)," << endl;
-  }
-  f_header_ <<
-    indent() << "  iface_(iface) {" << endl;
-  indent_up();
-
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    f_header_ <<
-      indent() << "processMap_[\"" << (*f_iter)->get_name() << "\"] = ";
-    if (generator_->gen_templates_) {
-      f_header_ << "ProcessFunctions(" << endl;
-      if (generator_->gen_templates_only_) {
-        indent(f_header_) << "  NULL," << endl;
-      } else {
-        indent(f_header_) << "  &" << class_name_ << "::process_" <<
-          (*f_iter)->get_name() << "," << endl;
-      }
-      indent(f_header_) << "  &" << class_name_ << "::process_" <<
-        (*f_iter)->get_name() << ")";
-    } else {
-      f_header_ << "&" << class_name_ << "::process_" << (*f_iter)->get_name();
-    }
-    f_header_ <<
-      ";" << endl;
-  }
-
-  indent_down();
-  f_header_ <<
-    indent() << "}" << endl <<
-    endl <<
-    indent() << "virtual ~" << class_name_ << "() {}" << endl;
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-
-  if (generator_->gen_templates_) {
-    // Generate a backwards compatible typedef, for callers who don't know
-    // about the new template-style code.
-    //
-    // We can't use TProtocol as the template parameter, since ProcessorT
-    // provides overloaded versions of most methods, one of which accepts
-    // TProtocol pointers, and one which accepts Protocol_ pointers.  This
-    // results in a compile error if instantiated with Protocol_ == TProtocol.
-    // Therefore, we define TDummyProtocol solely so we can use it as the
-    // template parameter here.
-    f_header_ <<
-      "typedef " << class_name_ <<
-      "< ::apache::thrift::protocol::TDummyProtocol > " <<
-      service_name_ << pstyle_ << "Processor;" << endl << endl;
-  }
-}
-
-void RustProcessorGenerator::generate_dispatch_call(bool template_protocol) {
-  string protocol = "::apache::thrift::protocol::TProtocol";
-  string function_suffix;
-  if (template_protocol) {
-    protocol = "Protocol_";
-    // We call the generic version dispatchCall(), and the specialized
-    // version dispatchCallTemplated().  We can't call them both
-    // dispatchCall(), since this will cause the compiler to issue a warning if
-    // a service that doesn't use templates inherits from a service that does
-    // use templates: the compiler complains that the subclass only implements
-    // the generic version of dispatchCall(), and hides the templated version.
-    // Using different names for the two functions prevents this.
-    function_suffix = "Templated";
-  }
-
-  f_out_ <<
-    template_header_ <<
-    ret_type_ << class_name_ <<
-    template_suffix_ << "::dispatchCall" << function_suffix << "(" <<
-    finish_cob_ << protocol << "* iprot, " << protocol << "* oprot, " <<
-    "const std::string& fname, int32_t seqid" << call_context_ << ") {" <<
-    endl;
-  indent_up();
-
-  // HOT: member function pointer map
-  f_out_ <<
-    indent() << typename_str_ << "ProcessMap::iterator pfn;" << endl <<
-    indent() << "pfn = processMap_.find(fname);" << endl <<
-    indent() << "if (pfn == processMap_.end()) {" << endl;
-  if (extends_.empty()) {
-    f_out_ <<
-      indent() << "  iprot->skip(::apache::thrift::protocol::T_STRUCT);" << endl <<
-      indent() << "  iprot->readMessageEnd();" << endl <<
-      indent() << "  iprot->getTransport()->readEnd();" << endl <<
-      indent() << "  ::apache::thrift::TApplicationException x(::apache::thrift::TApplicationException::UNKNOWN_METHOD, \"Invalid method name: '\"+fname+\"'\");" << endl <<
-      indent() << "  oprot->writeMessageBegin(fname, ::apache::thrift::protocol::T_EXCEPTION, seqid);" << endl <<
-      indent() << "  x.write(oprot);" << endl <<
-      indent() << "  oprot->writeMessageEnd();" << endl <<
-      indent() << "  oprot->getTransport()->writeEnd();" << endl <<
-      indent() << "  oprot->getTransport()->flush();" << endl <<
-      indent() << (style_ == "Cob" ? "  return cob(true);" : "  return true;") << endl;
-  } else {
-    f_out_ <<
-      indent() << "  return "
-               << extends_ << "::dispatchCall("
-               << (style_ == "Cob" ? "cob, " : "")
-               << "iprot, oprot, fname, seqid" << call_context_arg_ << ");" << endl;
-  }
-  f_out_ <<
-    indent() << "}" << endl;
-  if (template_protocol) {
-    f_out_ <<
-      indent() << "(this->*(pfn->second.specialized))";
-  } else {
-    if (generator_->gen_templates_only_) {
-      // TODO: This is a null pointer, so nothing good will come from calling
-      // it.  Throw an exception instead.
-      f_out_ <<
-        indent() << "(this->*(pfn->second.generic))";
-    } else if (generator_->gen_templates_) {
-      f_out_ <<
-        indent() << "(this->*(pfn->second.generic))";
-    } else {
-      f_out_ <<
-        indent() << "(this->*(pfn->second))";
-    }
-  }
-  f_out_ << "(" << cob_arg_ << "seqid, iprot, oprot" <<
-    call_context_arg_ << ");" << endl;
-
-  // TODO(dreiss): return pfn ret?
-  if (style_ == "Cob") {
-    f_out_ <<
-      indent() << "return;" << endl;
-  } else {
-    f_out_ <<
-      indent() << "return true;" << endl;
-  }
-
-  indent_down();
-  f_out_ <<
+  f_types_impl_ <<
+    "/* define the GError domain for exceptions */" << endl <<
+    "#define " << this->nspace_uc << name_uc << "_ERROR_DOMAIN \"" <<
+        this->nspace_lc << name_lc << "_error_quark\"" << endl <<
+    "GQuark" << endl <<
+    this->nspace_lc << name_lc << "_error_quark (void)" << endl <<
+    "{" << endl <<
+    "  return g_quark_from_static_string (" << this->nspace_uc << name_uc <<
+        "_ERROR_DOMAIN);" << endl <<
     "}" << endl <<
     endl;
 }
 
-void RustProcessorGenerator::generate_process_functions() {
-  vector<t_function*> functions = service_->get_functions();
-  vector<t_function*>::iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    if (generator_->gen_templates_) {
-      generator_->generate_process_function(service_, *f_iter, style_, false);
-      generator_->generate_process_function(service_, *f_iter, style_, true);
-    } else {
-      generator_->generate_process_function(service_, *f_iter, style_, false);
-    }
-  }
-}
-
-void RustProcessorGenerator::generate_factory() {
-  string if_factory_name = if_name_ + "Factory";
-
-  // Generate the factory class definition
-  f_header_ <<
-    template_header_ <<
-    "class " << factory_class_name_ <<
-      " : public ::apache::thrift::" <<
-        (style_ == "Cob" ? "async::TAsyncProcessorFactory" :  "TProcessorFactory") <<
-        " {" << endl <<
-    " public:" << endl;
-  indent_up();
-
-  f_header_ <<
-    indent() << factory_class_name_ << "(const ::boost::shared_ptr< " <<
-      if_factory_name << " >& handlerFactory) :" << endl <<
-    indent() << "    handlerFactory_(handlerFactory) {}" << endl <<
-    endl <<
-    indent() << "::boost::shared_ptr< ::apache::thrift::" <<
-      (style_ == "Cob" ? "async::TAsyncProcessor" :  "TProcessor") << " > " <<
-      "getProcessor(const ::apache::thrift::TConnectionInfo& connInfo);" <<
-      endl;
-
-  f_header_ <<
-    endl <<
-    " protected:" << endl <<
-    indent() << "::boost::shared_ptr< " << if_factory_name <<
-      " > handlerFactory_;" << endl;
-
-  indent_down();
-  f_header_ <<
-    "};" << endl << endl;
-
-  // If we are generating templates, output a typedef for the plain
-  // factory name.
-  if (generator_->gen_templates_) {
-    f_header_ <<
-      "typedef " << factory_class_name_ <<
-      "< ::apache::thrift::protocol::TDummyProtocol > " <<
-      service_name_ << pstyle_ << "ProcessorFactory;" << endl << endl;
-  }
-
-  // Generate the getProcessor() method
-  f_out_ <<
-    template_header_ <<
-    indent() << "::boost::shared_ptr< ::apache::thrift::" <<
-      (style_ == "Cob" ? "async::TAsyncProcessor" :  "TProcessor") << " > " <<
-      factory_class_name_ << template_suffix_ << "::getProcessor(" <<
-      "const ::apache::thrift::TConnectionInfo& connInfo) {" << endl;
-  indent_up();
-
-  f_out_ <<
-    indent() << "::apache::thrift::ReleaseHandler< " << if_factory_name <<
-      " > cleanup(handlerFactory_);" << endl <<
-    indent() << "::boost::shared_ptr< " << if_name_ << " > handler(" <<
-      "handlerFactory_->getHandler(connInfo), cleanup);" << endl <<
-    indent() << "::boost::shared_ptr< ::apache::thrift::" <<
-      (style_ == "Cob" ? "async::TAsyncProcessor" :  "TProcessor") << " > " <<
-      "processor(new " << class_name_ << template_suffix_ <<
-      "(handler));" << endl <<
-    indent() << "return processor;" << endl;
-
-  indent_down();
-  f_out_ <<
-    indent() << "}" << endl;
-}
+/********************
+ * HELPER FUNCTIONS *
+ ********************/
 
 /**
- * Generates a service processor definition.
- *
- * @param tservice The service to generate a processor for.
+ * Returns true if ttype is not a primitive.
  */
-void t_rust_generator::generate_service_processor(t_service* tservice,
-                                                 string style) {
-  RustProcessorGenerator generator(this, tservice, style);
-  generator.run();
-}
-
-/**
- * Generates a struct and helpers for a function.
- *
- * @param tfunction The function
- */
-void t_rust_generator::generate_function_helpers(t_service* tservice,
-                                                t_function* tfunction) {
-  if (tfunction->is_oneway()) {
-    return;
-  }
-
-  std::ofstream& out = (gen_templates_ ? f_service_tcc_ : f_service_);
-
-  t_struct result(program_, tservice->get_name() + "_" + tfunction->get_name() + "_result");
-  t_field success(tfunction->get_returntype(), "success", 0);
-  if (!tfunction->get_returntype()->is_void()) {
-    result.append(&success);
-  }
-
-  t_struct* xs = tfunction->get_xceptions();
-  const vector<t_field*>& fields = xs->get_members();
-  vector<t_field*>::const_iterator f_iter;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    result.append(*f_iter);
-  }
-
-  generate_struct_definition(f_header_, &result, false);
-  generate_struct_reader(out, &result);
-  generate_struct_result_writer(out, &result);
-
-  result.set_name(tservice->get_name() + "_" + tfunction->get_name() + "_presult");
-  generate_struct_definition(f_header_, &result, false, true, true, gen_cob_style_);
-  generate_struct_reader(out, &result, true);
-  if (gen_cob_style_) {
-    generate_struct_writer(out, &result, true);
-  }
-
-}
-
-/**
- * Generates a process function definition.
- *
- * @param tfunction The function to write a dispatcher for
- */
-void t_rust_generator::generate_process_function(t_service* tservice,
-                                                t_function* tfunction,
-                                                string style,
-                                                bool specialized) {
-  t_struct* arg_struct = tfunction->get_arglist();
-  const std::vector<t_field*>& fields = arg_struct->get_members();
-  vector<t_field*>::const_iterator f_iter;
-
-  t_struct* xs = tfunction->get_xceptions();
-  const std::vector<t_field*>& xceptions = xs->get_members();
-  vector<t_field*>::const_iterator x_iter;
-  string service_func_name = "\"" + tservice->get_name() + "." +
-    tfunction->get_name() + "\"";
-
-  std::ofstream& out = (gen_templates_ ? f_service_tcc_ : f_service_);
-
-  string prot_type =
-    (specialized ? "Protocol_" : "::apache::thrift::protocol::TProtocol");
-  string class_suffix;
-  if (gen_templates_) {
-    class_suffix = "T<Protocol_>";
-  }
-
-  // I tried to do this as one function.  I really did.  But it was too hard.
-  if (style != "Cob") {
-    // Open function
-    if (gen_templates_) {
-      out <<
-        indent() << "template <class Protocol_>" << endl;
-    }
-    const bool unnamed_oprot_seqid = tfunction->is_oneway() &&
-      !(gen_templates_ && !specialized);
-    out <<
-      "void " << tservice->get_name() << "Processor" << class_suffix << "::" <<
-      "process_" << tfunction->get_name() << "(" <<
-      "int32_t" << (unnamed_oprot_seqid ? ", " : " seqid, ") <<
-      prot_type << "* iprot, " <<
-      prot_type << "*" << (unnamed_oprot_seqid ? ", " : " oprot, ") <<
-      "void* callContext)" << endl;
-    scope_up(out);
-
-    string argsname = tservice->get_name() + "_" + tfunction->get_name() +
-      "_args";
-    string resultname = tservice->get_name() + "_" + tfunction->get_name() +
-      "_result";
-
-    if (tfunction->is_oneway() && !unnamed_oprot_seqid) {
-      out <<
-        indent() << "(void) seqid;" << endl <<
-        indent() << "(void) oprot;" << endl;
-    }
-
-    out <<
-      indent() << "void* ctx = NULL;" << endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  ctx = this->eventHandler_->getContext(" <<
-        service_func_name << ", callContext);" << endl <<
-      indent() << "}" << endl <<
-      indent() << "::apache::thrift::TProcessorContextFreer freer(" <<
-        "this->eventHandler_.get(), ctx, " << service_func_name << ");" <<
-        endl << endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->preRead(ctx, " <<
-        service_func_name << ");" << endl <<
-      indent() << "}" << endl << endl <<
-      indent() << argsname << " args;" << endl <<
-      indent() << "args.read(iprot);" << endl <<
-      indent() << "iprot->readMessageEnd();" << endl <<
-      indent() << "uint32_t bytes = iprot->getTransport()->readEnd();" <<
-        endl << endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->postRead(ctx, " <<
-        service_func_name << ", bytes);" << endl <<
-      indent() << "}" << endl <<
-      endl;
-
-    // Declare result
-    if (!tfunction->is_oneway()) {
-      out <<
-        indent() << resultname << " result;" << endl;
-    }
-
-    // Try block for functions with exceptions
-    out <<
-      indent() << "try {" << endl;
-    indent_up();
-
-    // Generate the function call
-    bool first = true;
-    out << indent();
-    if (!tfunction->is_oneway() && !tfunction->get_returntype()->is_void()) {
-      if (is_complex_type(tfunction->get_returntype())) {
-        first = false;
-        out << "iface_->" << tfunction->get_name() << "(result.success";
-      } else {
-        out << "result.success = iface_->" << tfunction->get_name() << "(";
-      }
-    } else {
-      out <<
-        "iface_->" << tfunction->get_name() << "(";
-    }
-    for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-      if (first) {
-        first = false;
-      } else {
-        out << ", ";
-      }
-      out << "args." << (*f_iter)->get_name();
-    }
-    out << ");" << endl;
-
-    // Set isset on success field
-    if (!tfunction->is_oneway() && !tfunction->get_returntype()->is_void()) {
-      out <<
-        indent() << "result.__isset.success = true;" << endl;
-    }
-
-    indent_down();
-    out << indent() << "}";
-
-    if (!tfunction->is_oneway()) {
-      for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
-        out << " catch (" << type_name((*x_iter)->get_type()) << " &" <<
-          (*x_iter)->get_name() << ") {" << endl;
-        if (!tfunction->is_oneway()) {
-          indent_up();
-          out <<
-            indent() << "result." << (*x_iter)->get_name() << " = " <<
-              (*x_iter)->get_name() << ";" << endl <<
-            indent() << "result.__isset." << (*x_iter)->get_name() <<
-              " = true;" << endl;
-          indent_down();
-          out << indent() << "}";
-        } else {
-          out << "}";
-        }
-      }
-    }
-
-    out << " catch (const std::exception& e) {" << endl;
-
-    indent_up();
-    out <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->handlerError(ctx, " <<
-        service_func_name << ");" << endl <<
-      indent() << "}" << endl;
-
-    if (!tfunction->is_oneway()) {
-      out <<
-        endl <<
-        indent() << "::apache::thrift::TApplicationException x(e.what());" <<
-          endl <<
-        indent() << "oprot->writeMessageBegin(\"" << tfunction->get_name() <<
-          "\", ::apache::thrift::protocol::T_EXCEPTION, seqid);" << endl <<
-        indent() << "x.write(oprot);" << endl <<
-        indent() << "oprot->writeMessageEnd();" << endl <<
-        indent() << "oprot->getTransport()->writeEnd();" << endl <<
-        indent() << "oprot->getTransport()->flush();" << endl;
-    }
-    out << indent() << "return;" << endl;
-    indent_down();
-    out << indent() << "}" << endl << endl;
-
-    // Shortcut out here for oneway functions
-    if (tfunction->is_oneway()) {
-      out <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->asyncComplete(ctx, " <<
-          service_func_name << ");" << endl <<
-        indent() << "}" << endl << endl <<
-        indent() << "return;" << endl;
-      indent_down();
-      out << "}" << endl <<
-        endl;
-      return;
-    }
-
-    // Serialize the result into a struct
-    out <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->preWrite(ctx, " <<
-        service_func_name << ");" << endl <<
-      indent() << "}" << endl << endl <<
-      indent() << "oprot->writeMessageBegin(\"" << tfunction->get_name() <<
-        "\", ::apache::thrift::protocol::T_REPLY, seqid);" << endl <<
-      indent() << "result.write(oprot);" << endl <<
-      indent() << "oprot->writeMessageEnd();" << endl <<
-      indent() << "bytes = oprot->getTransport()->writeEnd();" << endl <<
-      indent() << "oprot->getTransport()->flush();" << endl << endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->postWrite(ctx, " <<
-        service_func_name << ", bytes);" << endl <<
-      indent() << "}" << endl;
-
-    // Close function
-    scope_down(out);
-    out << endl;
-  }
-
-  // Cob style.
-  else {
-    // Processor entry point.
-    // TODO(edhall) update for callContext when TEventServer is ready
-    if (gen_templates_) {
-      out <<
-        indent() << "template <class Protocol_>" << endl;
-    }
-    out <<
-      "void " << tservice->get_name() << "AsyncProcessor" << class_suffix <<
-      "::process_" << tfunction->get_name() <<
-      "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-      prot_type << "* iprot, " << prot_type << "* oprot)" << endl;
-    scope_up(out);
-
-    // TODO(simpkins): we could try to consoldate this
-    // with the non-cob code above
-    if (gen_templates_ && !specialized) {
-      // If these are instances of Protocol_, instead of any old TProtocol,
-      // use the specialized process function instead.
-      out <<
-        indent() << "Protocol_* _iprot = dynamic_cast<Protocol_*>(iprot);" <<
-        endl <<
-        indent() << "Protocol_* _oprot = dynamic_cast<Protocol_*>(oprot);" <<
-        endl <<
-        indent() << "if (_iprot && _oprot) {" << endl <<
-        indent() << "  return process_" << tfunction->get_name() <<
-        "(cob, seqid, _iprot, _oprot);" << endl <<
-        indent() << "}" << endl <<
-        indent() << "T_GENERIC_PROTOCOL(this, iprot, _iprot);" << endl <<
-        indent() << "T_GENERIC_PROTOCOL(this, oprot, _oprot);" << endl << endl;
-    }
-
-    if (tfunction->is_oneway()) {
-      out <<
-        indent() << "(void) seqid;" << endl <<
-        indent() << "(void) oprot;" << endl;
-    }
-
-    out <<
-      indent() << tservice->get_name() + "_" + tfunction->get_name() <<
-        "_args args;" << endl <<
-      indent() << "void* ctx = NULL;" << endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  ctx = this->eventHandler_->getContext(" <<
-        service_func_name << ", NULL);" << endl <<
-      indent() << "}" << endl <<
-      indent() << "::apache::thrift::TProcessorContextFreer freer(" <<
-        "this->eventHandler_.get(), ctx, " << service_func_name << ");" <<
-        endl << endl <<
-      indent() << "try {" << endl;
-    indent_up();
-    out <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->preRead(ctx, " <<
-        service_func_name << ");" << endl <<
-      indent() << "}" << endl <<
-      indent() << "args.read(iprot);" << endl <<
-      indent() << "iprot->readMessageEnd();" << endl <<
-      indent() << "uint32_t bytes = iprot->getTransport()->readEnd();" <<
-        endl <<
-      indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "  this->eventHandler_->postRead(ctx, " <<
-        service_func_name << ", bytes);" << endl <<
-      indent() << "}" << endl;
-    scope_down(out);
-
-    // TODO(dreiss): Handle TExceptions?  Expose to server?
-    out <<
-      indent() << "catch (const std::exception& exn) {" << endl <<
-      indent() << "  if (this->eventHandler_.get() != NULL) {" << endl <<
-      indent() << "    this->eventHandler_->handlerError(ctx, " <<
-        service_func_name << ");" << endl <<
-      indent() << "  }" << endl <<
-      indent() << "  return cob(false);" << endl <<
-      indent() << "}" << endl;
-
-    if (tfunction->is_oneway()) {
-      out <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->asyncComplete(ctx, " <<
-          service_func_name << ");" << endl <<
-        indent() << "}" << endl;
-    }
-    // TODO(dreiss): Figure out a strategy for exceptions in async handlers.
-    out <<
-      indent() << "freer.unregister();" << endl;
-    if (tfunction->is_oneway()) {
-      // No return.  Just hand off our cob.
-      // TODO(dreiss): Call the cob immediately?
-      out <<
-        indent() << "iface_->" << tfunction->get_name() << "(" <<
-        "tcxx::bind(cob, true)" << endl;
-      indent_up(); indent_up();
-    } else {
-      string ret_arg, ret_placeholder;
-      if (!tfunction->get_returntype()->is_void()) {
-        ret_arg = ", const " + type_name(tfunction->get_returntype()) +
-          "& _return";
-        ret_placeholder = ", tcxx::placeholders::_1";
-      }
-
-      // When gen_templates_ is true, the return_ and throw_ functions are
-      // overloaded.  We have to declare pointers to them so that the compiler
-      // can resolve the correct overloaded version.
-      out <<
-        indent() << "void (" << tservice->get_name() << "AsyncProcessor" <<
-        class_suffix << "::*return_fn)(tcxx::function<void(bool ok)> " <<
-        "cob, int32_t seqid, " << prot_type << "* oprot, void* ctx" <<
-        ret_arg << ") =" << endl;
-      out <<
-        indent() << "  &" << tservice->get_name() << "AsyncProcessor" <<
-        class_suffix << "::return_" << tfunction->get_name() << ";" << endl;
-      if (!xceptions.empty()) {
-        out <<
-          indent() << "void (" << tservice->get_name() << "AsyncProcessor" <<
-          class_suffix << "::*throw_fn)(tcxx::function<void(bool ok)> " <<
-          "cob, int32_t seqid, " << prot_type << "* oprot, void* ctx, " <<
-          "::apache::thrift::TDelayedException* _throw) =" << endl;
-        out <<
-          indent() << "  &" << tservice->get_name() << "AsyncProcessor" <<
-          class_suffix << "::throw_" << tfunction->get_name() << ";" << endl;
-      }
-
-      out <<
-        indent() << "iface_->" << tfunction->get_name() << "(" << endl;
-      indent_up(); indent_up();
-      out <<
-        indent() << "tcxx::bind(return_fn, this, cob, seqid, oprot, ctx" <<
-        ret_placeholder << ")";
-      if (!xceptions.empty()) {
-        out
-          << ',' << endl <<
-          indent() << "tcxx::bind(throw_fn, this, cob, seqid, oprot, " <<
-          "ctx, tcxx::placeholders::_1)";
-      }
-    }
-
-    // XXX Whitespace cleanup.
-    for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-      out
-                 << ',' << endl <<
-        indent() << "args." << (*f_iter)->get_name();
-    }
-    out << ");" << endl;
-    indent_down(); indent_down();
-    scope_down(out);
-    out << endl;
-
-    // Normal return.
-    if (!tfunction->is_oneway()) {
-      string ret_arg_decl, ret_arg_name;
-      if (!tfunction->get_returntype()->is_void()) {
-        ret_arg_decl = ", const " + type_name(tfunction->get_returntype()) +
-          "& _return";
-        ret_arg_name = ", _return";
-      }
-      if (gen_templates_) {
-        out <<
-          indent() << "template <class Protocol_>" << endl;
-      }
-      out <<
-        "void " << tservice->get_name() << "AsyncProcessor" << class_suffix <<
-        "::return_" << tfunction->get_name() <<
-        "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-        prot_type << "* oprot, void* ctx" << ret_arg_decl << ')' << endl;
-      scope_up(out);
-
-      if (gen_templates_ && !specialized) {
-        // If oprot is a Protocol_ instance,
-        // use the specialized return function instead.
-        out <<
-          indent() << "Protocol_* _oprot = dynamic_cast<Protocol_*>(oprot);" <<
-          endl <<
-          indent() << "if (_oprot) {" << endl <<
-          indent() << "  return return_" << tfunction->get_name() <<
-          "(cob, seqid, _oprot, ctx" << ret_arg_name << ");" << endl <<
-          indent() << "}" << endl <<
-          indent() << "T_GENERIC_PROTOCOL(this, oprot, _oprot);" <<
-          endl << endl;
-      }
-
-      out <<
-        indent() << tservice->get_name() << "_" << tfunction->get_name() <<
-          "_presult result;" << endl;
-      if (!tfunction->get_returntype()->is_void()) {
-        // The const_cast here is unfortunate, but it would be a pain to avoid,
-        // and we only do a write with this struct, which is const-safe.
-        out <<
-          indent() << "result.success = const_cast<" <<
-            type_name(tfunction->get_returntype()) << "*>(&_return);" <<
-            endl <<
-          indent() << "result.__isset.success = true;" << endl;
-      }
-      // Serialize the result into a struct
-      out <<
-        endl <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  ctx = this->eventHandler_->getContext(" <<
-          service_func_name << ", NULL);" << endl <<
-        indent() << "}" << endl <<
-        indent() << "::apache::thrift::TProcessorContextFreer freer(" <<
-          "this->eventHandler_.get(), ctx, " << service_func_name <<
-          ");" << endl << endl <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->preWrite(ctx, " <<
-          service_func_name << ");" << endl <<
-        indent() << "}" << endl << endl <<
-        indent() << "oprot->writeMessageBegin(\"" << tfunction->get_name() <<
-          "\", ::apache::thrift::protocol::T_REPLY, seqid);" << endl <<
-        indent() << "result.write(oprot);" << endl <<
-        indent() << "oprot->writeMessageEnd();" << endl <<
-        indent() << "uint32_t bytes = oprot->getTransport()->writeEnd();" <<
-          endl <<
-        indent() << "oprot->getTransport()->flush();" << endl <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->postWrite(ctx, " <<
-          service_func_name << ", bytes);" << endl <<
-        indent() << "}" << endl <<
-        indent() << "return cob(true);" << endl;
-      scope_down(out);
-      out << endl;
-    }
-
-    // Exception return.
-    if (!tfunction->is_oneway() && !xceptions.empty()) {
-      if (gen_templates_) {
-        out <<
-          indent() << "template <class Protocol_>" << endl;
-      }
-      out <<
-        "void " << tservice->get_name() << "AsyncProcessor" << class_suffix <<
-        "::throw_" << tfunction->get_name() <<
-        "(tcxx::function<void(bool ok)> cob, int32_t seqid, " <<
-        prot_type << "* oprot, void* ctx, " <<
-        "::apache::thrift::TDelayedException* _throw)" << endl;
-      scope_up(out);
-
-      if (gen_templates_ && !specialized) {
-        // If oprot is a Protocol_ instance,
-        // use the specialized throw function instead.
-        out <<
-          indent() << "Protocol_* _oprot = dynamic_cast<Protocol_*>(oprot);" <<
-          endl <<
-          indent() << "if (_oprot) {" << endl <<
-          indent() << "  return throw_" << tfunction->get_name() <<
-          "(cob, seqid, _oprot, ctx, _throw);" << endl <<
-          indent() << "}" << endl <<
-          indent() << "T_GENERIC_PROTOCOL(this, oprot, _oprot);" <<
-          endl << endl;
-      }
-
-      // Get the event handler context
-      out <<
-        endl <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  ctx = this->eventHandler_->getContext(" <<
-          service_func_name << ", NULL);" << endl <<
-        indent() << "}" << endl <<
-        indent() << "::apache::thrift::TProcessorContextFreer freer(" <<
-          "this->eventHandler_.get(), ctx, " << service_func_name << ");" <<
-          endl << endl;
-
-      // Throw the TDelayedException, and catch the result
-      out <<
-        indent() << tservice->get_name() << "_" << tfunction->get_name() <<
-          "_result result;" << endl << endl <<
-        indent() << "try {" << endl;
-      indent_up();
-      out <<
-        indent() << "_throw->throw_it();" << endl <<
-        indent() << "return cob(false);" << endl;  // Is this possible?  TBD.
-      indent_down();
-      out <<
-        indent() << '}';
-      for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
-        out << "  catch (" << type_name((*x_iter)->get_type()) << " &" <<
-          (*x_iter)->get_name() << ") {" << endl;
-        indent_up();
-        out <<
-          indent() << "result." << (*x_iter)->get_name() << " = " <<
-            (*x_iter)->get_name() << ";" << endl <<
-          indent() << "result.__isset." << (*x_iter)->get_name() <<
-            " = true;" << endl;
-        scope_down(out);
-      }
-
-      // Handle the case where an undeclared exception is thrown
-      out << " catch (std::exception& e) {" << endl;
-      indent_up();
-      out <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->handlerError(ctx, " <<
-          service_func_name << ");" << endl <<
-        indent() << "}" << endl <<
-        endl <<
-        indent() << "::apache::thrift::TApplicationException x(e.what());" <<
-          endl <<
-        indent() << "oprot->writeMessageBegin(\"" << tfunction->get_name() <<
-          "\", ::apache::thrift::protocol::T_EXCEPTION, seqid);" << endl <<
-        indent() << "x.write(oprot);" << endl <<
-        indent() << "oprot->writeMessageEnd();" << endl <<
-        indent() << "oprot->getTransport()->writeEnd();" << endl <<
-        indent() << "oprot->getTransport()->flush();" << endl <<
-        // We pass true to the cob here, since we did successfully write a
-        // response, even though it is an exception response.
-        // It looks like the argument is currently ignored, anyway.
-        indent() << "return cob(true);" << endl;
-      scope_down(out);
-
-      // Serialize the result into a struct
-      out <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->preWrite(ctx, " <<
-          service_func_name << ");" << endl <<
-        indent() << "}" << endl << endl <<
-        indent() << "oprot->writeMessageBegin(\"" << tfunction->get_name() <<
-          "\", ::apache::thrift::protocol::T_REPLY, seqid);" << endl <<
-        indent() << "result.write(oprot);" << endl <<
-        indent() << "oprot->writeMessageEnd();" << endl <<
-        indent() << "uint32_t bytes = oprot->getTransport()->writeEnd();" <<
-          endl <<
-        indent() << "oprot->getTransport()->flush();" << endl <<
-        indent() << "if (this->eventHandler_.get() != NULL) {" << endl <<
-        indent() << "  this->eventHandler_->postWrite(ctx, " <<
-          service_func_name << ", bytes);" << endl <<
-        indent() << "}" << endl <<
-        indent() << "return cob(true);" << endl;
-      scope_down(out);
-      out << endl;
-    } // for each function
-  } // cob style
-}
-
-/**
- * Generates a skeleton file of a server
- *
- * @param tservice The service to generate a server for.
- */
-void t_rust_generator::generate_service_skeleton(t_service* tservice) {
-  string svcname = tservice->get_name();
-
-  // Service implementation file includes
-  string f_skeleton_name = get_out_dir()+svcname+"_server.skeleton.rs";
-
-  string ns = namespace_prefix(tservice->get_program()->get_namespace("rust"));
-
-  ofstream f_skeleton;
-  f_skeleton.open(f_skeleton_name.c_str());
-  f_skeleton <<
-    "// This autogenerated skeleton file illustrates how to build a server." << endl <<
-    "// You should copy it to another filename to avoid overwriting it." << endl <<
-    endl <<
-    "#include \"" << get_include_prefix(*get_program()) << svcname << ".h\"" << endl <<
-    "#include <thrift/protocol/TBinaryProtocol.h>" << endl <<
-    "#include <thrift/server/TSimpleServer.h>" << endl <<
-    "#include <thrift/transport/TServerSocket.h>" << endl <<
-    "#include <thrift/transport/TBufferTransports.h>" << endl <<
-    endl <<
-    "using namespace ::apache::thrift;" << endl <<
-    "using namespace ::apache::thrift::protocol;" << endl <<
-    "using namespace ::apache::thrift::transport;" << endl <<
-    "using namespace ::apache::thrift::server;" << endl <<
-    endl <<
-    "using boost::shared_ptr;" << endl <<
-    endl;
-
-  // the following code would not compile:
-  // using namespace ;
-  // using namespace ::;
-  if ( (!ns.empty()) && (ns.compare(" ::") != 0)) {
-    f_skeleton <<
-      "using namespace " << string(ns, 0, ns.size()-2) << ";" << endl <<
-      endl;
-  }
-
-  f_skeleton <<
-    "class " << svcname << "Handler : virtual public " << svcname << "If {" << endl <<
-    " public:" << endl;
-  indent_up();
-  f_skeleton <<
-    indent() << svcname << "Handler() {" << endl <<
-    indent() << "  // Your initialization goes here" << endl <<
-    indent() << "}" << endl <<
-    endl;
-
-  vector<t_function*> functions = tservice->get_functions();
-  vector<t_function*>::iterator f_iter;
-  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
-    f_skeleton <<
-      indent() << function_signature(*f_iter, "") << " {" << endl <<
-      indent() << "  // Your implementation goes here" << endl <<
-      indent() << "  printf(\"" << (*f_iter)->get_name() << "\\n\");" << endl <<
-      indent() << "}" << endl <<
-      endl;
-  }
-
-  indent_down();
-  f_skeleton <<
-    "};" << endl <<
-    endl;
-
-  f_skeleton <<
-    indent() << "int main(int argc, char **argv) {" << endl;
-  indent_up();
-  f_skeleton <<
-    indent() << "int port = 9090;" << endl <<
-    indent() << "shared_ptr<" << svcname << "Handler> handler(new " << svcname << "Handler());" << endl <<
-    indent() << "shared_ptr<TProcessor> processor(new " << svcname << "Processor(handler));" << endl <<
-    indent() << "shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));" << endl <<
-    indent() << "shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());" << endl <<
-    indent() << "shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());" << endl <<
-    endl <<
-    indent() << "TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);" << endl <<
-    indent() << "server.serve();" << endl <<
-    indent() << "return 0;" << endl;
-  indent_down();
-  f_skeleton <<
-    "}" << endl <<
-    endl;
-
-  // Close the files
-  f_skeleton.close();
-}
-
-/**
- * Deserializes a field of any type.
- */
-void t_rust_generator::generate_deserialize_field(ofstream& out,
-                                                 t_field* tfield,
-                                                 string prefix,
-                                                 string suffix) {
-  t_type* type = get_true_type(tfield->get_type());
-
-  if (type->is_void()) {
-    throw "CANNOT GENERATE DESERIALIZE CODE FOR void TYPE: " +
-      prefix + tfield->get_name();
-  }
-
-  string name = prefix + tfield->get_name() + suffix;
-
-  if (type->is_struct() || type->is_xception()) {
-    generate_deserialize_struct(out, (t_struct*)type, name);
-  } else if (type->is_container()) {
-    generate_deserialize_container(out, type, name);
-  } else if (type->is_base_type()) {
-    indent(out) <<
-      "xfer += iprot->";
-    t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
-    switch (tbase) {
-    case t_base_type::TYPE_VOID:
-      throw "compiler error: cannot serialize void field in a struct: " + name;
-      break;
-    case t_base_type::TYPE_STRING:
-      if (((t_base_type*)type)->is_binary()) {
-        out << "readBinary(" << name << ");";
-      }
-      else {
-        out << "readString(" << name << ");";
-      }
-      break;
-    case t_base_type::TYPE_BOOL:
-      out << "readBool(" << name << ");";
-      break;
-    case t_base_type::TYPE_BYTE:
-      out << "readByte(" << name << ");";
-      break;
-    case t_base_type::TYPE_I16:
-      out << "readI16(" << name << ");";
-      break;
-    case t_base_type::TYPE_I32:
-      out << "readI32(" << name << ");";
-      break;
-    case t_base_type::TYPE_I64:
-      out << "readI64(" << name << ");";
-      break;
-    case t_base_type::TYPE_DOUBLE:
-      out << "readDouble(" << name << ");";
-      break;
-    default:
-      throw "compiler error: no C++ reader for base type " + t_base_type::t_base_name(tbase) + name;
-    }
-    out <<
-      endl;
-  } else if (type->is_enum()) {
-    string t = tmp("ecast");
-    out <<
-      indent() << "int32_t " << t << ";" << endl <<
-      indent() << "xfer += iprot->readI32(" << t << ");" << endl <<
-      indent() << name << " = (" << type_name(type) << ")" << t << ";" << endl;
-  } else {
-    printf("DO NOT KNOW HOW TO DESERIALIZE FIELD '%s' TYPE '%s'\n",
-           tfield->get_name().c_str(), type_name(type).c_str());
-  }
-}
-
-/**
- * Generates an unserializer for a variable. This makes two key assumptions,
- * first that there is a const char* variable named data that points to the
- * buffer for deserialization, and that there is a variable protocol which
- * is a reference to a TProtocol serialization object.
- */
-void t_rust_generator::generate_deserialize_struct(ofstream& out,
-                                                  t_struct* tstruct,
-                                                  string prefix) {
-  (void) tstruct;
-  indent(out) <<
-    "xfer += " << prefix << ".read(iprot);" << endl;
-}
-
-void t_rust_generator::generate_deserialize_container(ofstream& out,
-                                                     t_type* ttype,
-                                                     string prefix) {
-  scope_up(out);
-
-  string size = tmp("_size");
-  string ktype = tmp("_ktype");
-  string vtype = tmp("_vtype");
-  string etype = tmp("_etype");
-
-  t_container* tcontainer = (t_container*)ttype;
-  bool use_push = tcontainer->has_rust_name();
-
-  indent(out) <<
-    prefix << ".clear();" << endl <<
-    indent() << "uint32_t " << size << ";" << endl;
-
-  // Declare variables, read header
-  if (ttype->is_map()) {
-    out <<
-      indent() << "::apache::thrift::protocol::TType " << ktype << ";" << endl <<
-      indent() << "::apache::thrift::protocol::TType " << vtype << ";" << endl <<
-      indent() << "xfer += iprot->readMapBegin(" <<
-                   ktype << ", " << vtype << ", " << size << ");" << endl;
-  } else if (ttype->is_set()) {
-    out <<
-      indent() << "::apache::thrift::protocol::TType " << etype << ";" << endl <<
-      indent() << "xfer += iprot->readSetBegin(" <<
-                   etype << ", " << size << ");" << endl;
-  } else if (ttype->is_list()) {
-    out <<
-      indent() << "::apache::thrift::protocol::TType " << etype << ";" << endl <<
-      indent() << "xfer += iprot->readListBegin(" <<
-      etype << ", " << size << ");" << endl;
-    if (!use_push) {
-      indent(out) << prefix << ".resize(" << size << ");" << endl;
-    }
-  }
-
-
-  // For loop iterates over elements
-  string i = tmp("_i");
-  out <<
-    indent() << "uint32_t " << i << ";" << endl <<
-    indent() << "for (" << i << " = 0; " << i << " < " << size << "; ++" << i << ")" << endl;
-
-    scope_up(out);
-
-    if (ttype->is_map()) {
-      generate_deserialize_map_element(out, (t_map*)ttype, prefix);
-    } else if (ttype->is_set()) {
-      generate_deserialize_set_element(out, (t_set*)ttype, prefix);
-    } else if (ttype->is_list()) {
-      generate_deserialize_list_element(out, (t_list*)ttype, prefix, use_push, i);
-    }
-
-    scope_down(out);
-
-  // Read container end
-  if (ttype->is_map()) {
-    indent(out) << "xfer += iprot->readMapEnd();" << endl;
-  } else if (ttype->is_set()) {
-    indent(out) << "xfer += iprot->readSetEnd();" << endl;
-  } else if (ttype->is_list()) {
-    indent(out) << "xfer += iprot->readListEnd();" << endl;
-  }
-
-  scope_down(out);
+bool t_rust_generator::is_complex_type(t_type *ttype) {
+  ttype = get_true_type (ttype);
+
+  return ttype->is_container()
+         || ttype->is_struct()
+         || ttype->is_xception()
+         || (ttype->is_base_type()
+             && (((t_base_type *) ttype)->get_base()
+                  == t_base_type::TYPE_STRING));
 }
 
 
 /**
- * Generates code to deserialize a map
+ * Maps a Thrift t_type to a C type.
  */
-void t_rust_generator::generate_deserialize_map_element(ofstream& out,
-                                                       t_map* tmap,
-                                                       string prefix) {
-  string key = tmp("_key");
-  string val = tmp("_val");
-  t_field fkey(tmap->get_key_type(), key);
-  t_field fval(tmap->get_val_type(), val);
-
-  out <<
-    indent() << declare_field(&fkey) << endl;
-
-  generate_deserialize_field(out, &fkey);
-  indent(out) <<
-    declare_field(&fval, false, false, false, true) << " = " <<
-    prefix << "[" << key << "];" << endl;
-
-  generate_deserialize_field(out, &fval);
-}
-
-void t_rust_generator::generate_deserialize_set_element(ofstream& out,
-                                                       t_set* tset,
-                                                       string prefix) {
-  string elem = tmp("_elem");
-  t_field felem(tset->get_elem_type(), elem);
-
-  indent(out) <<
-    declare_field(&felem) << endl;
-
-  generate_deserialize_field(out, &felem);
-
-  indent(out) <<
-    prefix << ".insert(" << elem << ");" << endl;
-}
-
-void t_rust_generator::generate_deserialize_list_element(ofstream& out,
-                                                        t_list* tlist,
-                                                        string prefix,
-                                                        bool use_push,
-                                                        string index) {
-  if (use_push) {
-    string elem = tmp("_elem");
-    t_field felem(tlist->get_elem_type(), elem);
-    indent(out) << declare_field(&felem) << endl;
-    generate_deserialize_field(out, &felem);
-    indent(out) << prefix << ".push_back(" << elem << ");" << endl;
-  } else {
-    t_field felem(tlist->get_elem_type(), prefix + "[" + index + "]");
-    generate_deserialize_field(out, &felem);
-  }
-}
-
-
-/**
- * Serializes a field of any type.
- *
- * @param tfield The field to serialize
- * @param prefix Name to prepend to field name
- */
-void t_rust_generator::generate_serialize_field(ofstream& out,
-                                               t_field* tfield,
-                                               string prefix,
-                                               string suffix) {
-  t_type* type = get_true_type(tfield->get_type());
-
-  string name = prefix + tfield->get_name() + suffix;
-
-  // Do nothing for void types
-  if (type->is_void()) {
-    throw "CANNOT GENERATE SERIALIZE CODE FOR void TYPE: " + name;
-  }
-
-
-
-  if (type->is_struct() || type->is_xception()) {
-    generate_serialize_struct(out,
-                              (t_struct*)type,
-                              name);
-  } else if (type->is_container()) {
-    generate_serialize_container(out, type, name);
-  } else if (type->is_base_type() || type->is_enum()) {
-
-    indent(out) <<
-      "xfer += oprot->";
-
-    if (type->is_base_type()) {
-      t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
-      switch (tbase) {
-      case t_base_type::TYPE_VOID:
-        throw
-          "compiler error: cannot serialize void field in a struct: " + name;
-        break;
-      case t_base_type::TYPE_STRING:
-        if (((t_base_type*)type)->is_binary()) {
-          out << "writeBinary(" << name << ");";
-        }
-        else {
-          out << "writeString(" << name << ");";
-        }
-        break;
-      case t_base_type::TYPE_BOOL:
-        out << "writeBool(" << name << ");";
-        break;
-      case t_base_type::TYPE_BYTE:
-        out << "writeByte(" << name << ");";
-        break;
-      case t_base_type::TYPE_I16:
-        out << "writeI16(" << name << ");";
-        break;
-      case t_base_type::TYPE_I32:
-        out << "writeI32(" << name << ");";
-        break;
-      case t_base_type::TYPE_I64:
-        out << "writeI64(" << name << ");";
-        break;
-      case t_base_type::TYPE_DOUBLE:
-        out << "writeDouble(" << name << ");";
-        break;
-      default:
-        throw "compiler error: no C++ writer for base type " + t_base_type::t_base_name(tbase) + name;
-      }
-    } else if (type->is_enum()) {
-      out << "writeI32((int32_t)" << name << ");";
-    }
-    out << endl;
-  } else {
-    printf("DO NOT KNOW HOW TO SERIALIZE FIELD '%s' TYPE '%s'\n",
-           name.c_str(),
-           type_name(type).c_str());
-  }
-}
-
-/**
- * Serializes all the members of a struct.
- *
- * @param tstruct The struct to serialize
- * @param prefix  String prefix to attach to all fields
- */
-void t_rust_generator::generate_serialize_struct(ofstream& out,
-                                                t_struct* tstruct,
-                                                string prefix) {
-  (void) tstruct;
-  indent(out) <<
-    "xfer += " << prefix << ".write(oprot);" << endl;
-}
-
-void t_rust_generator::generate_serialize_container(ofstream& out,
-                                                   t_type* ttype,
-                                                   string prefix) {
-  scope_up(out);
-
-  if (ttype->is_map()) {
-    indent(out) <<
-      "xfer += oprot->writeMapBegin(" <<
-      type_to_enum(((t_map*)ttype)->get_key_type()) << ", " <<
-      type_to_enum(((t_map*)ttype)->get_val_type()) << ", " <<
-      "static_cast<uint32_t>(" << prefix << ".size()));" << endl;
-  } else if (ttype->is_set()) {
-    indent(out) <<
-      "xfer += oprot->writeSetBegin(" <<
-      type_to_enum(((t_set*)ttype)->get_elem_type()) << ", " <<
-      "static_cast<uint32_t>(" << prefix << ".size()));" << endl;
-  } else if (ttype->is_list()) {
-    indent(out) <<
-      "xfer += oprot->writeListBegin(" <<
-      type_to_enum(((t_list*)ttype)->get_elem_type()) << ", " <<
-      "static_cast<uint32_t>(" << prefix << ".size()));" << endl;
-  }
-
-  string iter = tmp("_iter");
-  out <<
-    indent() << type_name(ttype) << "::const_iterator " << iter << ";" << endl <<
-    indent() << "for (" << iter << " = " << prefix  << ".begin(); " << iter << " != " << prefix << ".end(); ++" << iter << ")" << endl;
-  scope_up(out);
-    if (ttype->is_map()) {
-      generate_serialize_map_element(out, (t_map*)ttype, iter);
-    } else if (ttype->is_set()) {
-      generate_serialize_set_element(out, (t_set*)ttype, iter);
-    } else if (ttype->is_list()) {
-      generate_serialize_list_element(out, (t_list*)ttype, iter);
-    }
-  scope_down(out);
-
-  if (ttype->is_map()) {
-    indent(out) <<
-      "xfer += oprot->writeMapEnd();" << endl;
-  } else if (ttype->is_set()) {
-    indent(out) <<
-      "xfer += oprot->writeSetEnd();" << endl;
-  } else if (ttype->is_list()) {
-    indent(out) <<
-      "xfer += oprot->writeListEnd();" << endl;
-  }
-
-  scope_down(out);
-}
-
-/**
- * Serializes the members of a map.
- *
- */
-void t_rust_generator::generate_serialize_map_element(ofstream& out,
-                                                     t_map* tmap,
-                                                     string iter) {
-  t_field kfield(tmap->get_key_type(), iter + "->first");
-  generate_serialize_field(out, &kfield, "");
-
-  t_field vfield(tmap->get_val_type(), iter + "->second");
-  generate_serialize_field(out, &vfield, "");
-}
-
-/**
- * Serializes the members of a set.
- */
-void t_rust_generator::generate_serialize_set_element(ofstream& out,
-                                                     t_set* tset,
-                                                     string iter) {
-  t_field efield(tset->get_elem_type(), "(*" + iter + ")");
-  generate_serialize_field(out, &efield, "");
-}
-
-/**
- * Serializes the members of a list.
- */
-void t_rust_generator::generate_serialize_list_element(ofstream& out,
-                                                      t_list* tlist,
-                                                      string iter) {
-  t_field efield(tlist->get_elem_type(), "(*" + iter + ")");
-  generate_serialize_field(out, &efield, "");
-}
-
-/**
- * Makes a :: prefix for a namespace
- *
- * @param ns The namespace, w/ periods in it
- * @return Namespaces
- */
-string t_rust_generator::namespace_prefix(string ns) {
-  // Always start with "::", to avoid possible name collisions with
-  // other names in one of the current namespaces.
-  //
-  // We also need a leading space, in case the name is used inside of a
-  // template parameter.  "MyTemplate<::foo::Bar>" is not valid C++,
-  // since "<:" is an alternative token for "[".
-  string result = " ::";
-
-  if (ns.size() == 0) {
-    return result;
-  }
-  string::size_type loc;
-  while ((loc = ns.find(".")) != string::npos) {
-    result += ns.substr(0, loc);
-    result += "::";
-    ns = ns.substr(loc+1);
-  }
-  if (ns.size() > 0) {
-    result += ns + "::";
-  }
-  return result;
-}
-
-/**
- * Opens namespace.
- *
- * @param ns The namespace, w/ periods in it
- * @return Namespaces
- */
-string t_rust_generator::namespace_open(string ns) {
-  if (ns.size() == 0) {
-    return "";
-  }
-  string result = "";
-  string separator = "";
-  string::size_type loc;
-  while ((loc = ns.find(".")) != string::npos) {
-    result += separator;
-    result += "namespace ";
-    result += ns.substr(0, loc);
-    result += " {";
-    separator = " ";
-    ns = ns.substr(loc+1);
-  }
-  if (ns.size() > 0) {
-    result += separator + "namespace " + ns + " {";
-  }
-  return result;
-}
-
-/**
- * Closes namespace.
- *
- * @param ns The namespace, w/ periods in it
- * @return Namespaces
- */
-string t_rust_generator::namespace_close(string ns) {
-  if (ns.size() == 0) {
-    return "";
-  }
-  string result = "}";
-  string::size_type loc;
-  while ((loc = ns.find(".")) != string::npos) {
-    result += "}";
-    ns = ns.substr(loc+1);
-  }
-  result += " // namespace";
-  return result;
-}
-
-/**
- * Returns a C++ type name
- *
- * @param ttype The type
- * @return String of the type name, i.e. std::set<type>
- */
-string t_rust_generator::type_name(t_type* ttype, bool in_typedef, bool arg) {
+string t_rust_generator::type_name (t_type* ttype, bool in_typedef, bool is_const) {
+  (void) in_typedef;
   if (ttype->is_base_type()) {
-    string bname = base_type_name(((t_base_type*)ttype)->get_base());
-    std::map<string, string>::iterator it = ttype->annotations_.find("rust.type");
-    if (it != ttype->annotations_.end()) {
-      bname = it->second;
-    }
+    string bname = base_type_name ((t_base_type *) ttype);
 
-    if (!arg) {
+    if (is_const) {
+      return "const " + bname;
+    } else {
       return bname;
     }
-
-    if (((t_base_type*)ttype)->get_base() == t_base_type::TYPE_STRING) {
-      return "const " + bname + "&";
-    } else {
-      return "const " + bname;
-    }
   }
 
-  // Check for a custom overloaded C++ name
   if (ttype->is_container()) {
     string cname;
 
-    t_container* tcontainer = (t_container*) ttype;
-    if (tcontainer->has_rust_name()) {
-      cname = tcontainer->get_rust_name();
+    t_container *tcontainer = (t_container *) ttype;
+    if (tcontainer->has_cpp_name()) {
+      cname = tcontainer->get_cpp_name();
     } else if (ttype->is_map()) {
-      t_map* tmap = (t_map*) ttype;
-      cname = "std::map<" +
-        type_name(tmap->get_key_type(), in_typedef) + ", " +
-        type_name(tmap->get_val_type(), in_typedef) + "> ";
+      cname = "GHashTable *";
     } else if (ttype->is_set()) {
-      t_set* tset = (t_set*) ttype;
-      cname = "std::set<" + type_name(tset->get_elem_type(), in_typedef) + "> ";
+      // since a set requires unique elements, use a GHashTable, and
+      // populate the keys and values with the same data, using keys for
+      // the actual writes and reads.
+      // TODO: discuss whether or not to implement TSet, THashSet or GHashSet
+      cname = "GHashTable *";
     } else if (ttype->is_list()) {
-      t_list* tlist = (t_list*) ttype;
-      cname = "std::vector<" + type_name(tlist->get_elem_type(), in_typedef) + "> ";
+      // TODO: investigate other implementations besides GPtrArray
+      cname = "GPtrArray *";
+      t_type *etype = ((t_list *) ttype)->get_elem_type();
+      if (etype->is_base_type()) {
+        t_base_type::t_base tbase = ((t_base_type *) etype)->get_base();
+        switch (tbase) {
+          case t_base_type::TYPE_VOID:
+            throw "compiler error: cannot determine array type";
+          case t_base_type::TYPE_BOOL:
+          case t_base_type::TYPE_BYTE:
+          case t_base_type::TYPE_I16:
+          case t_base_type::TYPE_I32:
+          case t_base_type::TYPE_I64:
+          case t_base_type::TYPE_DOUBLE:
+            cname = "GArray *";
+            break;
+          case t_base_type::TYPE_STRING:
+            break;
+          default:
+            throw "compiler error: no array info for type";
+        }
+      }
     }
 
-    if (arg) {
-      return "const " + cname + "&";
+    if (is_const) {
+      return "const " + cname;
     } else {
       return cname;
     }
   }
 
-  string class_prefix;
-  if (in_typedef && (ttype->is_struct() || ttype->is_xception())) {
-    class_prefix = "class ";
+  // check for a namespace
+  string pname = this->nspace + ttype->get_name();
+
+  if (is_complex_type (ttype)) {
+    pname += " *";
   }
 
-  // Check if it needs to be namespaced
-  string pname;
-  t_program* program = ttype->get_program();
-  if (program != NULL && program != program_) {
-    pname =
-      class_prefix +
-      namespace_prefix(program->get_namespace("rust")) +
-      ttype->get_name();
-  } else {
-    pname = class_prefix + ttype->get_name();
-  }
-
-  if (ttype->is_enum() && !gen_pure_enums_) {
-    pname += "::type";
-  }
-
-  if (arg) {
-    if (is_complex_type(ttype)) {
-      return "const " + pname + "&";
-    } else {
-      return "const " + pname;
-    }
+  if (is_const) {
+    return "const " + pname;
   } else {
     return pname;
   }
 }
 
 /**
- * Returns the C++ type that corresponds to the thrift type.
- *
- * @param tbase The base type
- * @return Explicit C++ type, i.e. "int32_t"
+ * Maps a Thrift primitive to a C primitive.
  */
-string t_rust_generator::base_type_name(t_base_type::t_base tbase) {
+string t_rust_generator::base_type_name(t_base_type *type) {
+  t_base_type::t_base tbase = type->get_base();
+
   switch (tbase) {
-  case t_base_type::TYPE_VOID:
-    return "void";
-  case t_base_type::TYPE_STRING:
-    return "std::string";
-  case t_base_type::TYPE_BOOL:
-    return "bool";
-  case t_base_type::TYPE_BYTE:
-    return "int8_t";
-  case t_base_type::TYPE_I16:
-    return "int16_t";
-  case t_base_type::TYPE_I32:
-    return "int32_t";
-  case t_base_type::TYPE_I64:
-    return "int64_t";
-  case t_base_type::TYPE_DOUBLE:
-    return "double";
-  default:
-    throw "compiler error: no C++ base type name for base type " + t_base_type::t_base_name(tbase);
+    case t_base_type::TYPE_VOID:
+      return "void";
+    case t_base_type::TYPE_STRING:
+      if (type->is_binary()) {
+        return "GByteArray *";
+      } else {
+        return "gchar *";
+      }
+    case t_base_type::TYPE_BOOL:
+      return "gboolean";
+    case t_base_type::TYPE_BYTE:
+      return "gint8";
+    case t_base_type::TYPE_I16:
+      return "gint16";
+    case t_base_type::TYPE_I32:
+      return "gint32";
+    case t_base_type::TYPE_I64:
+      return "gint64";
+    case t_base_type::TYPE_DOUBLE:
+      return "gdouble";
+    default:
+      throw "compiler error: no C base type name for base type "
+            + t_base_type::t_base_name (tbase);
   }
 }
 
 /**
- * Declares a field, which may include initialization as necessary.
- *
- * @param ttype The type
- * @return Field declaration, i.e. int x = 0;
+ * Returns a member of the ThriftType C enumeration in thrift_protocol.h
+ * for a Thrift type.
  */
-string t_rust_generator::declare_field(t_field* tfield, bool init, bool pointer, bool constant, bool reference) {
-  // TODO(mcslee): do we ever need to initialize the field?
+string t_rust_generator::type_to_enum (t_type *type) {
+  type = get_true_type (type);
+
+  if (type->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) type)->get_base();
+
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "NO T_VOID CONSTRUCT";
+      case t_base_type::TYPE_STRING:
+        return "T_STRING";
+      case t_base_type::TYPE_BOOL:
+        return "T_BOOL";
+      case t_base_type::TYPE_BYTE:
+        return "T_BYTE";
+      case t_base_type::TYPE_I16:
+        return "T_I16";
+      case t_base_type::TYPE_I32:
+        return "T_I32";
+      case t_base_type::TYPE_I64:
+        return "T_I64";
+      case t_base_type::TYPE_DOUBLE:
+        return "T_DOUBLE";
+    }
+  } else if (type->is_enum()) {
+    return "T_I32";
+  } else if (type->is_struct()) {
+    return "T_STRUCT";
+  } else if (type->is_xception()) {
+    return "T_STRUCT";
+  } else if (type->is_map()) {
+    return "T_MAP";
+  } else if (type->is_set()) {
+    return "T_SET";
+  } else if (type->is_list()) {
+    return "T_LIST";
+  }
+
+  throw "INVALID TYPE IN type_to_enum: " + type->get_name();
+}
+
+
+/**
+ * Returns C code that represents a Thrift constant.
+ */
+string t_rust_generator::constant_value(string name, t_type *type, t_const_value *value) {
+  ostringstream render;
+
+  if (type->is_base_type()) {
+    /* primitives */
+    t_base_type::t_base tbase = ((t_base_type *) type)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_STRING:
+        render << "g_strdup (\"" + value->get_string() + "\")";
+        break;
+      case t_base_type::TYPE_BOOL:
+        render << ((value->get_integer() != 0) ? 1 : 0);
+        break;
+      case t_base_type::TYPE_BYTE:
+      case t_base_type::TYPE_I16:
+      case t_base_type::TYPE_I32:
+      case t_base_type::TYPE_I64:
+        render << value->get_integer();
+        break;
+      case t_base_type::TYPE_DOUBLE:
+        if (value->get_type() == t_const_value::CV_INTEGER) {
+          render << value->get_integer();
+        } else {
+          render << value->get_double();
+        }
+        break;
+      default:
+        throw "compiler error: no const of base type "
+              + t_base_type::t_base_name (tbase);
+    }
+  } else if (type->is_enum()) {
+    render << "(" << type_name (type) << ")" << value->get_integer();
+  } else if (type->is_struct() || type->is_xception() || type->is_list()
+             || type->is_set() || type->is_map()) {
+    render << "(" << this->nspace_lc <<
+      to_lower_case(name) << "_constant())";
+  } else {
+    render << "NULL /* not supported */";
+  }
+
+  return render.str();
+}
+
+/**
+ * Renders a function signature of the form 'type name(args)'
+ *
+ * @param tfunction Function definition
+ * @return String of rendered function definition
+ */
+string t_rust_generator::function_signature(t_function* tfunction) {
+  t_type* ttype = tfunction->get_returntype();
+  t_struct* arglist = tfunction->get_arglist();
+  t_struct* xlist = tfunction->get_xceptions();
+  string fname = initial_caps_to_underscores(tfunction->get_name());
+
+  bool has_return = !ttype->is_void();
+  bool has_args = arglist->get_members().size() == 0;
+  bool has_xceptions = xlist->get_members().size() == 0;
+  return
+    "gboolean " + this->nspace_lc + fname + " (" + this->nspace
+    + service_name_ + "If * iface"
+    + (has_return ? ", " + type_name(ttype) + "* _return" : "")
+    + (has_args ? "" : (", " + argument_list (arglist))) 
+    + (has_xceptions ? "" : (", " + xception_list (xlist)))
+    + ", GError ** error)";
+}
+
+/**
+ * Renders a field list
+ *
+ * @param tstruct The struct definition
+ * @return Comma sepearated list of all field names in that struct
+ */
+string t_rust_generator::argument_list (t_struct* tstruct) {
+  string result = "";
+
+  const vector<t_field*>& fields = tstruct->get_members();
+  vector<t_field*>::const_iterator f_iter;
+  bool first = true;
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    if (first) {
+      first = false;
+    } else {
+      result += ", ";
+    }
+    result += type_name((*f_iter)->get_type(), false, true) + " " +
+              (*f_iter)->get_name();
+  }
+  return result;
+}
+
+/**
+ * Renders mutable exception lists
+ *
+ * @param tstruct The struct definition
+ * @return Comma sepearated list of all field names in that struct
+ */
+string t_rust_generator::xception_list (t_struct* tstruct) {
+  string result = "";
+
+  const vector<t_field*>& fields = tstruct->get_members();
+  vector<t_field*>::const_iterator f_iter;
+  bool first = true;
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    if (first) {
+      first = false;
+    } else {
+      result += ", ";
+    }
+    result += type_name((*f_iter)->get_type(), false, false) + "* " +
+              (*f_iter)->get_name();
+  }
+  return result;
+}
+
+
+/**
+ * Declares a field, including any necessary initialization.
+ */
+string t_rust_generator::declare_field(t_field *tfield,
+                                         bool init,
+                                         bool pointer,
+                                         bool constant,
+                                         bool reference) {
   string result = "";
   if (constant) {
     result += "const ";
@@ -4423,230 +790,2284 @@ string t_rust_generator::declare_field(t_field* tfield, bool init, bool pointer,
     result += "*";
   }
   if (reference) {
-    result += "&";
+    result += "*";
   }
   result += " " + tfield->get_name();
   if (init) {
     t_type* type = get_true_type(tfield->get_type());
 
     if (type->is_base_type()) {
-      t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
+      t_base_type::t_base tbase = ((t_base_type *) type)->get_base();
       switch (tbase) {
+        case t_base_type::TYPE_VOID:
+          break;
+        case t_base_type::TYPE_BOOL:
+        case t_base_type::TYPE_BYTE:
+        case t_base_type::TYPE_I16:
+        case t_base_type::TYPE_I32:
+        case t_base_type::TYPE_I64:
+          result += " = 0";
+          break;
+        case t_base_type::TYPE_DOUBLE:
+          result += " = (gdouble) 0";
+          break;
+        case t_base_type::TYPE_STRING:
+          result += " = NULL";
+          break;
+        default:
+          throw "compiler error: no C intializer for base type "
+                + t_base_type::t_base_name (tbase);
+      }
+    } else if (type->is_enum()) {
+      result += " = (" + type_name (type) + ") 0";
+    } else if (type->is_struct() || type->is_container()) {
+      result += " = NULL";
+    }
+  }
+
+  if (!reference) {
+    result += ";";
+  }
+
+  return result;
+}
+
+/**
+ * Generates C code that initializes complex constants.
+ */
+void t_rust_generator::generate_const_initializer(string name, t_type *type, t_const_value *value) {
+  string name_u = initial_caps_to_underscores(name);
+  string name_lc = to_lower_case(name_u);
+  string type_u = initial_caps_to_underscores(type->get_name());
+  string type_uc = to_upper_case(type_u);
+
+  if (type->is_struct() || type->is_xception()) {
+    const vector<t_field *> &fields = ((t_struct *) type)->get_members();
+    vector<t_field *>::const_iterator f_iter;
+    const map<t_const_value *, t_const_value *> &val = value->get_map();
+    map<t_const_value *, t_const_value *>::const_iterator v_iter;
+    ostringstream initializers;
+
+    // initialize any constants that may be referenced by this initializer
+    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
+      t_type *field_type = NULL;
+      string field_name = "";
+
+      for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+        if ((*f_iter)->get_name() == v_iter->first->get_string()) {
+          field_type = (*f_iter)->get_type();
+          field_name = (*f_iter)->get_name();
+        }
+      }
+      if (field_type == NULL) {
+        throw "type error: " + type->get_name() + " has no field "
+              + v_iter->first->get_string();
+      }
+      field_name = tmp (field_name);
+
+      generate_const_initializer (name + "_constant_" + field_name,
+                                  field_type, v_iter->second);
+      initializers <<
+        "    constant->" << v_iter->first->get_string() << " = " <<
+        constant_value (name + "_constant_" + field_name,
+                        field_type, v_iter->second) << ";" << endl <<
+        "    constant->__isset_" << v_iter->first->get_string() <<
+        " = TRUE;" << endl;
+    }
+
+    // implement the initializer
+    f_types_impl_ <<
+      "static " << this->nspace << type->get_name() << " *" << endl <<
+      this->nspace_lc << name_lc << "_constant (void)" << endl <<
+      "{" << endl <<
+      "  static " << this->nspace << type->get_name() <<
+          " *constant = NULL;" << endl <<
+      "  if (constant == NULL)" << endl <<
+      "  {" << endl <<
+      "    constant = g_object_new (" << this->nspace_uc << "TYPE_" <<
+          type_uc << ", NULL);" << endl <<
+      initializers.str() << endl <<
+      "  }" << endl <<
+      "  return constant;" << endl <<
+      "}" << endl <<
+      endl;
+  } else if (type->is_list()) {
+    string list_type = "GPtrArray *";
+    // TODO: This initialization should contain a free function for container
+    string list_initializer = "g_ptr_array_new();";
+    string list_appender = "g_ptr_array_add";
+    bool list_variable = false;
+
+    t_type* etype = ((t_list*)type)->get_elem_type();
+    const vector<t_const_value*>& val = value->get_list();
+    vector<t_const_value*>::const_iterator v_iter;
+    ostringstream initializers;
+
+    list_initializer = generate_new_array_from_type (etype);
+    if (etype->is_base_type()) {
+      t_base_type::t_base tbase = ((t_base_type *) etype)->get_base();
+      switch (tbase) {
+        case t_base_type::TYPE_VOID:
+          throw "compiler error: cannot determine array type";
+        case t_base_type::TYPE_BOOL:
+        case t_base_type::TYPE_BYTE:
+        case t_base_type::TYPE_I16:
+        case t_base_type::TYPE_I32:
+        case t_base_type::TYPE_I64:
+        case t_base_type::TYPE_DOUBLE:
+          list_type = "GArray *";
+          list_appender = "g_array_append_val";
+          list_variable = true;
+          break;
+        case t_base_type::TYPE_STRING:
+          break;
+        default:
+          throw "compiler error: no array info for type";
+      }
+    }
+
+    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
+      string fname = tmp (name);
+
+      generate_const_initializer (fname, etype, (*v_iter));
+      if (list_variable) {
+        initializers <<
+          "    " << type_name (etype) << " " << fname << " = " <<
+            constant_value (fname, (t_type *) etype, (*v_iter)) << ";" <<
+                endl <<
+          "    " << list_appender << "(constant, " << fname << ");" << endl;
+      } else {
+        initializers <<
+          "    " << list_appender << "(constant, " <<
+          constant_value (fname, (t_type *) etype, (*v_iter)) << ");" << endl;
+      }
+    }
+
+    f_types_impl_ <<
+      "static " << list_type << endl <<
+      this->nspace_lc << name_lc << "_constant (void)" << endl <<
+      "{" << endl <<
+      "  static " << list_type << " constant = NULL;" << endl <<
+      "  if (constant == NULL)" << endl <<
+      "  {" << endl <<
+      "    constant = " << list_initializer << endl <<
+      initializers.str() << endl <<
+      "  }" << endl <<
+      "  return constant;" << endl <<
+      "}" << endl <<
+    endl;
+  } else if (type->is_set()) {
+    t_type *etype = ((t_set *) type)->get_elem_type();
+    const vector<t_const_value *>& val = value->get_list();
+    vector<t_const_value*>::const_iterator v_iter;
+    ostringstream initializers;
+
+    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
+      string fname = tmp (name);
+      generate_const_initializer (fname, etype, (*v_iter));
+      initializers <<
+        "    " << type_name (etype) << " " << fname << " = " <<
+          constant_value (fname, (t_type *) etype, (*v_iter)) << ";" << endl <<
+        "    g_hash_table_insert (constant, &" << fname << ", &" << fname <<
+        ");" << endl;
+    }
+
+    f_types_impl_ <<
+      "static GHashTable *" << endl <<
+      this->nspace_lc << name_lc << "_constant (void)" << endl <<
+      "{" << endl <<
+      "  static GHashTable *constant = NULL;" << endl <<
+      "  if (constant == NULL)" << endl <<
+      "  {" << endl <<
+      // TODO: This initialization should contain a free function for elements
+      "    constant = g_hash_table_new (NULL, NULL);" << endl <<
+      initializers.str() << endl <<
+      "  }" << endl <<
+      "  return constant;" << endl <<
+      "}" << endl <<
+    endl; 
+  } else if (type->is_map()) {
+    t_type *ktype = ((t_map *) type)->get_key_type();
+    t_type *vtype = ((t_map *) type)->get_val_type();
+    const vector<t_const_value *>& val = value->get_list();
+    vector<t_const_value*>::const_iterator v_iter;
+    ostringstream initializers;
+
+    for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
+      string fname = tmp (name);
+      string kname = fname + "key";
+      string vname = fname + "val";
+      generate_const_initializer (kname, ktype, (*v_iter));
+      generate_const_initializer (vname, vtype, (*v_iter));
+
+      initializers <<
+        "    " << type_name (ktype) << " " << kname << " = " <<
+          constant_value (kname, (t_type *) ktype, (*v_iter)) << ";" << endl <<
+        "    " << type_name (vtype) << " " << vname << " = " <<
+          constant_value (vname, (t_type *) vtype, (*v_iter)) << ";" << endl <<
+        "    g_hash_table_insert (constant, &" << fname << ", &" << fname <<
+        ");" << endl;
+    }
+
+    f_types_impl_ <<
+      "static GHashTable *" << endl <<
+      this->nspace_lc << name_lc << "_constant (void)" << endl <<
+      "{" << endl <<
+      "  static GHashTable *constant = NULL;" << endl <<
+      "  if (constant == NULL)" << endl <<
+      "  {" << endl <<
+      // TODO: This initialization should contain a free function for elements
+      "    constant = g_hash_table_new (NULL, NULL);" << endl <<
+      initializers.str() << endl <<
+      "  }" << endl <<
+      "  return constant;" << endl <<
+      "}" << endl <<
+    endl;
+  }
+}
+
+/**
+ * Generates C code that represents a Thrift service client.
+ */
+void t_rust_generator::generate_service_client(t_service *tservice) {
+  /* get some C friendly service names */
+  string service_name_lc = to_lower_case(initial_caps_to_underscores(service_name_));
+  string service_name_uc = to_upper_case(service_name_lc);
+
+  // Generate the client interface dummy object in the header.
+  f_header_ <<
+    "/* " << service_name_ << " service interface */" << endl <<
+    "typedef struct _" << this->nspace << service_name_ << "If " <<
+        this->nspace << service_name_ << "If; " <<
+        " /* dummy object */" << endl <<
+    endl;
+
+  // Generate the client interface object in the header.
+  f_header_ <<
+    "struct _" << this->nspace << service_name_ << "IfInterface" << endl <<
+    "{" << endl <<
+    "  GTypeInterface parent;" << endl <<
+  endl;
+
+  /* write out the functions for this interface */
+  indent_up();
+  vector<t_function*> functions = tservice->get_functions();
+  vector<t_function*>::const_iterator f_iter;
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    /* make the function name C friendly */
+    string funname = initial_caps_to_underscores((*f_iter)->get_name());
+    t_type *ttype = (*f_iter)->get_returntype();
+    t_struct *arglist = (*f_iter)->get_arglist();
+    t_struct *xlist = (*f_iter)->get_xceptions();
+    bool has_return = !ttype->is_void();
+    bool has_args = arglist->get_members().size() == 0;
+    bool has_xceptions = xlist->get_members().size() == 0;
+
+    string params = "(" + this->nspace + service_name_ + "If *iface"
+                    + (has_return ? ", " + type_name (ttype) + "* _return" : "")
+                    + (has_args ? "" : (", " + argument_list (arglist)))
+                    + (has_xceptions ? "" : (", " + xception_list (xlist)))
+                    + ", GError **error)";
+                    
+    indent(f_header_) << "gboolean (*" << funname << ") " << params << ";" <<
+                          endl;
+  }
+  indent_down();
+
+  f_header_ <<
+    "};" << endl <<
+    "typedef struct _" << this->nspace << service_name_ << "IfInterface " <<
+        this->nspace << service_name_ << "IfInterface;" << endl <<
+    endl;
+
+  // generate all the interface boilerplate
+  f_header_ <<
+    "GType " << this->nspace_lc << service_name_lc <<
+        "_if_get_type (void);" << endl <<
+    "#define " << this->nspace_uc << "TYPE_" << service_name_uc << "_IF " <<
+        "(" << this->nspace_lc << service_name_lc << "_if_get_type())" <<
+        endl <<
+    "#define " << this->nspace_uc << service_name_uc << "_IF(obj) " <<
+        "(G_TYPE_CHECK_INSTANCE_CAST ((obj), " <<
+        this->nspace_uc << "TYPE_" << service_name_uc << "_IF, " <<
+        this->nspace << service_name_ << "If))" << endl <<
+    "#define " << this->nspace_uc << "IS_" << service_name_uc << "_IF(obj) " <<
+        "(G_TYPE_CHECK_INSTANCE_TYPE ((obj), " <<
+        this->nspace_uc << "TYPE_" << service_name_uc << "_IF))" << endl <<
+    "#define " << this->nspace_uc << service_name_uc <<
+        "_IF_GET_INTERFACE(inst) (G_TYPE_INSTANCE_GET_INTERFACE ((inst), " <<
+        this->nspace_uc << "TYPE_" << service_name_uc << "_IF, " <<
+        this->nspace << service_name_ << "IfInterface))" << endl <<
+    endl;
+
+  // write out all the interface function prototypes
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    /* make the function name C friendly */
+    string funname = initial_caps_to_underscores((*f_iter)->get_name());
+    t_type *ttype = (*f_iter)->get_returntype();
+    t_struct *arglist = (*f_iter)->get_arglist();
+    t_struct *xlist = (*f_iter)->get_xceptions();
+    bool has_return = !ttype->is_void();
+    bool has_args = arglist->get_members().size() == 0;
+    bool has_xceptions = xlist->get_members().size() == 0;
+
+    string params = "(" + this->nspace + service_name_ + "If *iface"
+                    + (has_return ? ", " + type_name (ttype) + "* _return" : "")
+                    + (has_args ? "" : (", " + argument_list (arglist)))
+                    + (has_xceptions ? "" : (", " + xception_list (xlist)))
+                    + ", GError **error)";
+
+    f_header_ << "gboolean " << this->nspace_lc << service_name_lc <<
+                 "_if_" << funname << " " << params << ";" << endl;
+  }
+  f_header_ << endl;
+
+  // Generate the client object instance definition in the header.
+  f_header_ <<
+    "/* " << service_name_ << " service client */" << endl <<
+    "struct _" << this->nspace << service_name_ << "Client" << endl <<
+    "{" << endl <<
+    "  GObject parent;" << endl <<
+    endl <<
+    "  ThriftProtocol *input_protocol;" << endl <<
+    "  ThriftProtocol *output_protocol;" << endl <<
+    "};" << endl <<
+    "typedef struct _" << this->nspace << service_name_ << "Client " <<
+      this->nspace << service_name_ << "Client;" << endl <<
+    endl;
+
+  // Generate the class definition in the header.
+  f_header_ <<
+    "struct _" << this->nspace << service_name_ << "ClientClass" << endl <<
+    "{" << endl <<
+    "  GObjectClass parent;" << endl <<
+    "};" << endl <<
+    "typedef struct _" << this->nspace << service_name_ << "ClientClass " <<
+      this->nspace << service_name_ << "ClientClass;" << endl <<
+    endl;
+
+  // Create all the GObject boilerplate
+  f_header_ <<
+    "GType " << this->nspace_lc << service_name_lc << 
+        "_client_get_type (void);" << endl <<
+    "#define " << this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT " <<
+        "(" << this->nspace_lc << service_name_lc << "_client_get_type())" <<
+        endl <<
+    "#define " << this->nspace_uc << service_name_uc << "_CLIENT(obj) " <<
+        "(G_TYPE_CHECK_INSTANCE_CAST ((obj), " << 
+        this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT, " << 
+        this->nspace << service_name_ << "Client))" << endl <<
+    "#define " << this->nspace_uc << service_name_uc << "_CLIENT_CLASS(c) " << 
+        "(G_TYPE_CHECK_CLASS_CAST ((c), " << 
+        this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT, " << 
+        this->nspace << service_name_ << "ClientClass))" << endl <<
+    "#define " << this->nspace_uc << service_name_uc << "_IS_CLIENT(obj) " <<
+        "(G_TYPE_CHECK_INSTANCE_TYPE ((obj), " << 
+        this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT))" << endl << 
+    "#define " << this->nspace_uc << service_name_uc <<
+        "_IS_CLIENT_CLASS(c) " << "(G_TYPE_CHECK_CLASS_TYPE ((c), " << 
+        this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT))" << endl <<
+    "#define " << this->nspace_uc << service_name_uc <<
+        "_CLIENT_GET_CLASS(obj) " << "(G_TYPE_INSTANCE_GET_CLASS ((obj), " << 
+        this->nspace_uc << "TYPE_" << service_name_uc << "_CLIENT, " <<
+        this->nspace << service_name_ << "ClientClass))" << endl << 
+    endl;
+
+  /* write out the function prototypes */
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    /* make the function name C friendly */
+    string funname = to_lower_case(initial_caps_to_underscores((*f_iter)->get_name()));
+
+    t_function service_function ((*f_iter)->get_returntype(),
+                                 service_name_lc + string ("_client_")
+                                 + funname,
+                                 (*f_iter)->get_arglist(),
+                                 (*f_iter)->get_xceptions());
+    indent(f_header_) << function_signature (&service_function) << ";" << endl;
+
+    t_function send_function (g_type_void,
+                              service_name_lc + string ("_client_send_")
+                              + funname,
+                              (*f_iter)->get_arglist());
+    indent(f_header_) << function_signature (&send_function) << ";" << endl;
+
+    // implement recv if not a oneway service
+    if (!(*f_iter)->is_oneway()) {
+      t_struct noargs (program_);
+      t_function recv_function ((*f_iter)->get_returntype(),
+                                service_name_lc + string ("_client_recv_") 
+                                + funname,
+                                &noargs,
+                                (*f_iter)->get_xceptions());
+      indent(f_header_) << function_signature (&recv_function) << ";" << endl;
+    }
+  }
+
+  /* write out the get/set function prototypes */
+  f_header_ << "void " + service_name_lc + "_client_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec);" << endl;
+  f_header_ << "void " + service_name_lc + "_client_get_property (GObject *object, guint property_id, GValue *value, GParamSpec *pspec);" << endl;
+
+  f_header_ << endl;
+  // end of header code
+
+  // Generate interface method implementations
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    /* make the function name C friendly */
+    string funname = initial_caps_to_underscores((*f_iter)->get_name());
+    t_type *ttype = (*f_iter)->get_returntype();
+    t_struct *arglist = (*f_iter)->get_arglist();
+    t_struct *xlist = (*f_iter)->get_xceptions();
+    bool has_return = !ttype->is_void();
+    bool has_args = arglist->get_members().size() == 0;
+    bool has_xceptions = xlist->get_members().size() == 0;
+
+    string params = "(" + this->nspace + service_name_ + "If *iface"
+                    + (has_return ? ", " + type_name (ttype) + "* _return" : "")
+                    + (has_args ? "" : (", " + argument_list (arglist)))
+                    + (has_xceptions ? "" : (", " + xception_list (xlist)))
+                    + ", GError **error)";
+
+    string params_without_type = string("iface, ")
+                                 + (has_return ? "_return, " : "");
+
+    const vector<t_field *>& fields = arglist->get_members();
+    vector<t_field *>::const_iterator f_iter_field;
+    for (f_iter_field = fields.begin(); f_iter_field != fields.end(); ++f_iter_field) {
+      params_without_type += (*f_iter_field)->get_name(); 
+      params_without_type += ", ";
+    }
+
+    const vector<t_field *>& xceptions = xlist->get_members();
+    vector<t_field *>::const_iterator x_iter;
+    for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
+      params_without_type += (*x_iter)->get_name();
+      params_without_type += ", ";
+    }
+
+    f_service_ <<
+      "gboolean" << endl <<
+      this->nspace_lc << service_name_lc << "_if_" << funname << " " <<
+          params << endl <<
+      "{" << endl << 
+      "  return " << this->nspace_uc << service_name_uc <<
+          "_IF_GET_INTERFACE (iface)->" << funname << " (" <<
+          params_without_type << "error);" << endl <<
+      "}" << endl <<
+      endl;
+  }
+
+  // Generate interface boilerplate
+  f_service_ <<
+    "GType" << endl <<
+    this->nspace_lc << service_name_lc << "_if_get_type (void)" << endl <<
+    "{" << endl <<
+    "  static GType type = 0;" << endl <<
+    "  if (type == 0)" << endl <<
+    "  {" << endl <<
+    "    static const GTypeInfo type_info =" << endl <<
+    "    {" << endl <<
+    "      sizeof (" << this->nspace << service_name_ << "IfInterface)," <<
+        endl <<
+    "      NULL,  /* base_init */" << endl <<
+    "      NULL,  /* base_finalize */" << endl <<
+    "      NULL,  /* class_init */" << endl <<
+    "      NULL,  /* class_finalize */" << endl <<
+    "      NULL,  /* class_data */" << endl <<
+    "      0,     /* instance_size */" << endl <<
+    "      0,     /* n_preallocs */" << endl <<
+    "      NULL,  /* instance_init */" << endl <<
+    "      NULL   /* value_table */" << endl <<
+    "    };" << endl <<
+    "    type = g_type_register_static (G_TYPE_INTERFACE," << endl <<
+    "                                   \"" << this->nspace << service_name_ <<
+        "If\"," << endl <<
+    "                                   &type_info, 0);" << endl <<
+    "  }" << endl <<
+    "  return type;" << endl <<
+    "}" << endl <<
+    endl;
+
+  // Generate client boilerplate
+  f_service_ <<
+    "static void " << endl <<
+    this->nspace_lc << service_name_lc <<
+        "_if_interface_init (" << this->nspace << service_name_ <<
+        "IfInterface *iface);" << endl <<
+    endl <<
+    "G_DEFINE_TYPE_WITH_CODE (" << this->nspace << service_name_ <<
+      "Client, " << this->nspace_lc << service_name_lc << "_client," << endl <<
+      "                       G_TYPE_OBJECT, " << endl <<
+    "                         G_IMPLEMENT_INTERFACE (" <<
+        this->nspace_uc << "TYPE_" << service_name_uc << "_IF," << endl <<
+    "                                                " <<
+        this->nspace_lc << service_name_lc << "_if_interface_init));" << endl <<
+    endl;
+
+  // Generate client properties
+  f_service_ <<
+    "enum _" << this->nspace << service_name_ << "ClientProperties" << endl <<
+    "{" << endl <<
+    "  PROP_0," << endl <<
+    "  PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_INPUT_PROTOCOL," <<
+        endl <<
+    "  PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_OUTPUT_PROTOCOL" <<
+        endl <<
+    "};" << endl <<
+  endl;
+
+  // generate property setter
+  f_service_ <<
+    "void" << endl <<
+    this->nspace_lc << service_name_lc << "_client_set_property (" <<
+        "GObject *object, guint property_id, const GValue *value, " <<
+        "GParamSpec *pspec)" << endl <<
+    "{" << endl <<
+    "  " << this->nspace << service_name_ << "Client *client = " <<
+        this->nspace_uc << service_name_uc << "_CLIENT (object);" << endl <<
+    endl <<
+    "  THRIFT_UNUSED_VAR (pspec);" << endl <<
+    endl <<
+    "  switch (property_id)" << endl <<
+    "  {" << endl <<
+    "    case PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_INPUT_PROTOCOL:" << endl <<
+    "      client->input_protocol = g_value_get_object (value);" << endl <<
+    "      break;" << endl <<
+    "    case PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_OUTPUT_PROTOCOL:" << endl <<
+    "      client->output_protocol = g_value_get_object (value);" << endl <<
+    "      break;" << endl <<
+    "  }" << endl <<
+    "}" << endl <<
+  endl;
+
+  // generate property getter
+  f_service_ <<
+    "void" << endl <<
+    this->nspace_lc << service_name_lc << "_client_get_property (" <<
+        "GObject *object, guint property_id, GValue *value, " <<
+        "GParamSpec *pspec)" << endl <<
+    "{" << endl <<
+    "  " << this->nspace << service_name_ << "Client *client = " <<
+        this->nspace_uc << service_name_uc << "_CLIENT (object);" << endl <<
+    endl <<
+    "  THRIFT_UNUSED_VAR (pspec);" << endl <<
+    endl <<
+    "  switch (property_id)" << endl <<
+    "  {" << endl <<
+    "    case PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_INPUT_PROTOCOL:" << endl <<
+    "      g_value_set_object (value, client->input_protocol);" << endl <<
+    "      break;" << endl <<
+    "    case PROP_" << this->nspace_uc << service_name_uc <<
+        "_CLIENT_OUTPUT_PROTOCOL:" << endl <<
+    "      g_value_set_object (value, client->output_protocol);" << endl <<
+    "      break;" << endl <<
+    "  }" << endl <<
+    "}" << endl <<
+  endl;
+
+
+  // Generate client method implementations
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    string name = (*f_iter)->get_name();
+    string funname = initial_caps_to_underscores(name);
+
+    // Get the struct of function call params and exceptions
+    t_struct* arg_struct = (*f_iter)->get_arglist();
+
+    // Function for sending
+    t_function send_function (g_type_void,
+                              service_name_lc + string ("_client_send_")
+                              + funname,
+                              (*f_iter)->get_arglist());
+
+    // Open the send function
+    indent(f_service_) <<
+      function_signature (&send_function) << endl;
+    scope_up(f_service_);
+
+    // Serialize the request
+    f_service_ <<
+      indent() << "gint32 cseqid = 0;" << endl <<
+      indent() << "ThriftProtocol * protocol = " << 
+        this->nspace_uc << service_name_uc << 
+        "_CLIENT (iface)->output_protocol;" << endl <<
+      endl <<
+      indent() << "if (thrift_protocol_write_message_begin (protocol, \"" <<
+        name << "\", T_CALL, cseqid, error) < 0)" << endl <<
+      indent() << "  return FALSE;" << endl <<
+      endl;
+
+    generate_struct_writer (f_service_, arg_struct, "", "", false);
+
+    f_service_ <<
+      indent() <<
+        "if (thrift_protocol_write_message_end (protocol, error) < 0)" <<
+        endl <<
+      indent() <<
+        "  return FALSE;" << endl <<
+      indent() <<
+        "if (!thrift_transport_flush (protocol->transport, error))" << endl <<
+      indent() <<
+        "  return FALSE;" << endl <<
+      indent() <<
+        "if (!thrift_transport_write_end (protocol->transport, error))" <<
+        endl <<
+      indent() <<
+        "  return FALSE;" << endl <<
+      endl <<
+      indent() << 
+        "return TRUE;" << endl;
+
+    scope_down(f_service_);
+    f_service_ << endl;
+
+    // Generate recv function only if not an async function
+    if (!(*f_iter)->is_oneway()) {
+      t_struct noargs (program_);
+      t_function recv_function ((*f_iter)->get_returntype(),
+                                service_name_lc
+                                + string ("_client_recv_") + funname, &noargs,
+                                (*f_iter)->get_xceptions());
+      // Open function
+      indent(f_service_) <<
+        function_signature (&recv_function) << endl;
+      scope_up(f_service_);
+
+      f_service_ << endl <<
+        indent() << "gint32 rseqid;" << endl <<
+        indent() << "gchar * fname;" << endl <<
+        indent() << "ThriftMessageType mtype;" << endl <<
+        indent() << "ThriftProtocol * protocol = " << 
+                      this->nspace_uc << service_name_uc <<
+                      "_CLIENT (iface)->input_protocol;" << endl <<
+        endl <<
+        indent() << "if (thrift_protocol_read_message_begin " << 
+                      "(protocol, &fname, &mtype, &rseqid, error) < 0)" <<
+                      endl <<
+        indent() << "{" << endl <<
+        indent() << "  if (fname) g_free (fname);" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        indent() << "}" << endl <<
+        endl <<
+        indent() << "if (mtype == T_EXCEPTION) {" << endl <<
+        indent() << "  if (fname) g_free (fname);" << endl <<
+        indent() << "  ThriftApplicationException *xception = g_object_new (THRIFT_TYPE_APPLICATION_EXCEPTION, NULL);" << endl <<
+
+        indent() << "  thrift_struct_read (THRIFT_STRUCT (xception), protocol, NULL);" << endl <<
+        indent() << "  thrift_protocol_read_message_end (protocol, NULL);" << endl <<
+        indent() << "  thrift_transport_read_end (protocol->transport, NULL);" << endl <<
+        indent() << "  g_set_error (error, THRIFT_APPLICATION_EXCEPTION_ERROR, xception->type, \"application error: %s\", xception->message);" << endl <<
+        indent() << "  g_object_unref (xception);" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        indent() << "} else if (mtype != T_REPLY) {" << endl <<
+        indent() << "  if (fname) g_free (fname);" << endl <<
+        indent() << "  thrift_protocol_skip (protocol, T_STRUCT, NULL);" << endl <<
+        indent() << "  thrift_protocol_read_message_end (protocol, NULL);" << endl <<
+        indent() << "  thrift_transport_read_end (protocol->transport, NULL);" << endl << 
+        indent() << "  g_set_error (error, THRIFT_APPLICATION_EXCEPTION_ERROR, THRIFT_APPLICATION_EXCEPTION_ERROR_INVALID_MESSAGE_TYPE, \"invalid message type %d, expected T_REPLY\", mtype);" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        indent() << "} else if (strncmp (fname, \"" << name << "\", " << name.length() << ") != 0) {" << endl <<
+        indent() << "  thrift_protocol_skip (protocol, T_STRUCT, NULL);" << endl <<
+        indent() << "  thrift_protocol_read_message_end (protocol, error);" << endl <<
+        indent() << "  thrift_transport_read_end (protocol->transport, error);" << endl <<
+        indent() << "  g_set_error (error, THRIFT_APPLICATION_EXCEPTION_ERROR, THRIFT_APPLICATION_EXCEPTION_ERROR_WRONG_METHOD_NAME, \"wrong method name %s, expected " << name << "\", fname);" << endl <<
+        indent() << "  if (fname) g_free (fname);" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        indent() << "}" << endl <<
+        indent() << "if (fname) g_free (fname);" << endl << 
+        endl;
+
+      t_struct* xs = (*f_iter)->get_xceptions();
+      const std::vector<t_field*>& xceptions = xs->get_members();
+      vector<t_field*>::const_iterator x_iter;
+
+      {
+        t_struct result(program_, tservice->get_name() + "_" + 
+                        (*f_iter)->get_name() + "_result");
+        t_field success((*f_iter)->get_returntype(), "*_return", 0);
+        if (!(*f_iter)->get_returntype()->is_void()) {
+          result.append(&success);
+        }
+
+        // add readers for exceptions, dereferencing the pointer.
+        for (x_iter = xceptions.begin(); x_iter != xceptions.end(); x_iter++) {
+          t_field *xception = new t_field((*x_iter)->get_type(),
+                                          "*" + (*x_iter)->get_name(),
+                                          (*x_iter)->get_key());
+          result.append (xception);
+        }
+
+        generate_struct_reader (f_service_, &result, "", "", false);
+      }
+
+      f_service_ <<
+        indent() << "if (thrift_protocol_read_message_end (protocol, error) < 0)" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        endl <<
+        indent() << "if (!thrift_transport_read_end (protocol->transport, error))" << endl <<
+        indent() << "  return FALSE;" << endl <<
+        endl;
+
+      // copy over any throw exceptions and return failure
+      for (x_iter = xceptions.begin(); x_iter != xceptions.end(); x_iter++) {
+        f_service_ << 
+          indent() << "if (*" << (*x_iter)->get_name() << " != NULL)" << endl <<
+          indent() << "{" << endl <<
+          indent() << "    g_set_error (error, " << this->nspace_uc <<
+              to_upper_case(initial_caps_to_underscores(
+                                 (*x_iter)->get_type()->get_name())) <<
+              "_ERROR, " <<
+              this->nspace_uc <<
+              to_upper_case(initial_caps_to_underscores(
+                                 (*x_iter)->get_type()->get_name())) <<
+              "_ERROR_CODE, \"" << (*x_iter)->get_type()->get_name() << 
+              "\");" << endl <<
+          indent() << "    return FALSE;" << endl <<
+          indent() << "}" << endl;
+      }
+      // Close function
+      indent(f_service_) << "return TRUE;" << endl;
+      scope_down(f_service_);
+      f_service_ << endl;
+    }
+
+    // Open function
+    t_function service_function((*f_iter)->get_returntype(),
+                                 service_name_lc
+                                 + string ("_client_") + funname,
+                                 (*f_iter)->get_arglist(),
+                                 (*f_iter)->get_xceptions());
+    indent(f_service_) <<
+      function_signature (&service_function) << endl;
+    scope_up(f_service_);
+
+    // wrap each function
+    f_service_ <<
+      indent() << "if (!" << this->nspace_lc << service_name_lc <<
+                   "_client_send_" << funname <<
+      " (iface";
+
+    // Declare the function arguments
+    const vector<t_field *> &fields = arg_struct->get_members();
+    vector<t_field *>::const_iterator fld_iter;
+    for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
+      f_service_ << ", " << (*fld_iter)->get_name();
+    }
+    f_service_ << ", error))" << endl <<
+      indent() << "  return FALSE;" << endl;
+
+    // if not oneway, implement recv
+    if (!(*f_iter)->is_oneway()) {
+      string ret = (*f_iter)->get_returntype()->is_void() ? "" : "_return, ";
+
+      const vector<t_field *>& xceptions =
+          (*f_iter)->get_xceptions()->get_members();
+      vector<t_field *>::const_iterator x_iter;
+      for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
+        ret += (*x_iter)->get_name();
+        ret += ", ";
+      }
+
+      f_service_ <<
+        indent() << "if (!" << this->nspace_lc << service_name_lc <<
+          "_client_recv_" << funname <<
+          " (iface, " << ret << "error))" << endl <<
+        indent() << "  return FALSE;" << endl;
+    }
+
+    // return TRUE which means all functions were called OK
+    indent(f_service_) << "return TRUE;" << endl;
+    scope_down(f_service_);
+    f_service_ << endl;
+  }
+
+  // create the interface initializer
+  f_service_ <<
+    "static void" << endl <<
+    this->nspace_lc << service_name_lc << "_if_interface_init (" <<
+        this->nspace << service_name_ << "IfInterface *iface)" << endl <<
+    "{" << endl;
+  for (f_iter = functions.begin(); f_iter != functions.end(); ++f_iter) {
+    /* make the function name C friendly */
+    string funname = initial_caps_to_underscores((*f_iter)->get_name());
+
+    f_service_ <<
+      "  iface->" << funname << " = " << this->nspace_lc << service_name_lc <<
+        "_client_" << funname << ";" << endl;
+  }
+  f_service_ <<
+    "}" << endl <<
+    endl;
+
+  // create the client instance initializer
+  f_service_ <<
+    "static void" << endl <<
+    this->nspace_lc << service_name_lc << "_client_init (" <<
+        this->nspace << service_name_ << "Client *client)" << endl <<
+    "{" << endl <<
+    "  client->input_protocol = NULL;" << endl <<
+    "  client->output_protocol = NULL;" << endl <<
+    "}" << endl <<
+    endl;
+
+  // create the client class initializer
+  f_service_ <<
+    "static void" << endl <<
+    this->nspace_lc << service_name_lc << "_client_class_init (" <<
+        this->nspace << service_name_ << "ClientClass *cls)" << endl <<
+    "{" << endl <<
+    "  GObjectClass *gobject_class = G_OBJECT_CLASS (cls);" << endl <<
+    "  GParamSpec *param_spec;" << endl <<
+    endl <<
+    "  gobject_class->set_property = " << this->nspace_lc <<
+        service_name_lc << "_client_set_property;" << endl <<
+    "  gobject_class->get_property = " << this->nspace_lc <<
+        service_name_lc << "_client_get_property;" << endl <<
+    endl <<
+    "  param_spec = g_param_spec_object (\"input_protocol\"," << endl <<
+    "                                    \"input protocol (construct)\"," <<
+        endl <<
+    "                                    \"Set the client input protocol\"," <<
+        endl <<
+    "                                    THRIFT_TYPE_PROTOCOL," << endl <<
+    "                                    G_PARAM_READWRITE);" << endl <<
+    "  g_object_class_install_property (gobject_class," << endl <<
+    "                                   PROP_" << this->nspace_uc <<
+        service_name_uc << "_CLIENT_INPUT_PROTOCOL, param_spec);" << endl <<
+    endl <<
+    "  param_spec = g_param_spec_object (\"output_protocol\"," << endl <<
+    "                                    \"output protocol (construct)\"," <<
+        endl <<
+    "                                    \"Set the client output protocol\"," <<
+        endl <<
+    "                                    THRIFT_TYPE_PROTOCOL," << endl <<
+    "                                    G_PARAM_READWRITE);" << endl <<
+    "  g_object_class_install_property (gobject_class," << endl <<
+    "                                   PROP_" << this->nspace_uc <<
+        service_name_uc << "_CLIENT_OUTPUT_PROTOCOL, param_spec);" << endl <<
+    "}" << endl <<
+    endl;
+}
+
+/**
+ * Generates C code that represents a Thrift service server.
+ */
+void t_rust_generator::generate_service_server (t_service *tservice) {
+  (void) tservice;
+  /* get some C friendly service names */
+  string service_name_u = initial_caps_to_underscores(service_name_);
+  string service_name_uc = to_upper_case(service_name_u);
+
+  // write the server object instance definition in the header.
+  // TODO: implement after implement TServer and TProcessor
+}
+
+/**
+ * Generates C code to represent a THrift structure as a GObject.
+ */
+void t_rust_generator::generate_object(t_struct *tstruct) {
+  string name = tstruct->get_name();
+  string name_u = initial_caps_to_underscores(name);
+  string name_uc = to_upper_case(name_u);
+
+  // write the instance definition
+  f_types_ <<
+    "struct _" << this->nspace << name << endl <<
+    "{ " << endl <<
+    "  ThriftStruct parent; " << endl <<
+    endl <<
+    "  /* public */" << endl;
+
+  // for each field, add a member variable
+  vector<t_field *>::const_iterator m_iter;
+  const vector<t_field *> &members = tstruct->get_members();
+  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
+    t_type *t = get_true_type ((*m_iter)->get_type());
+    f_types_ <<
+      "  " << type_name (t) << " " << (*m_iter)->get_name() << ";" << endl;
+    if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
+      f_types_ <<
+        "  gboolean __isset_" << (*m_iter)->get_name() << ";" << endl;
+    }
+  }
+
+  // close the structure definition and create a typedef
+  f_types_ <<
+    "};" << endl <<
+    "typedef struct _" << this->nspace << name << " " << 
+        this->nspace << name << ";" << endl <<
+      endl;
+
+  // write the class definition
+  f_types_ <<
+    "struct _" << this->nspace << name << "Class" << endl <<
+    "{" << endl <<
+    "  ThriftStructClass parent;" << endl <<
+    "};" << endl <<
+    "typedef struct _" << this->nspace << name << "Class " << this->nspace << name << "Class;" << endl <<
+    endl;
+
+  // write the standard GObject boilerplate
+  f_types_ <<
+    "GType " << this->nspace_lc << name_u << "_get_type (void);" << endl <<
+    "#define " << this->nspace_uc << "TYPE_" << name_uc << " (" << this->nspace_lc << name_u << "_get_type())" << endl <<
+    "#define " << this->nspace_uc << name_uc << "(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), " << this->nspace_uc << "TYPE_" << name_uc << ", " << this->nspace << name << "))" << endl <<
+    "#define " << this->nspace_uc << name_uc << "_CLASS(c) (G_TYPE_CHECK_CLASS_CAST ((c), " << this->nspace_uc << "_TYPE_" << name_uc << ", " << this->nspace << name << "Class))" << endl <<
+    "#define " << this->nspace_uc << "IS_" << name_uc << "(obj) (G_TYPE_CHECK_INSTANCE_TYPE ((obj), " << this->nspace_uc << "TYPE_" << name_uc << "))" << endl <<
+    "#define " << this->nspace_uc << "IS_" << name_uc << "_CLASS(c) (G_TYPE_CHECK_CLASS_TYPE ((c), " << this->nspace_uc << "TYPE_" << name_uc << "))" << endl <<
+    "#define " << this->nspace_uc << name_uc << "_GET_CLASS(obj) (G_TYPE_INSTANCE_GET_CLASS ((obj), " << this->nspace_uc << "TYPE_" << name_uc << ", " << this->nspace << name << "Class))" << endl <<
+    endl;
+
+  // start writing the object implementation .c file
+  // generate struct I/O methods
+  string this_get = this->nspace + name + " * this_object = " 
+                    + this->nspace_uc + name_uc + "(object);";
+  generate_struct_reader (f_types_impl_, tstruct, "this_object->", this_get);
+  generate_struct_writer (f_types_impl_, tstruct, "this_object->", this_get);
+
+  // generate the instance init function
+  f_types_impl_ <<
+    "static void " << endl <<
+    this->nspace_lc << name_u << "_instance_init (" << this->nspace << name << " * object)" << endl <<
+    "{" << endl;
+
+  // satisfy compilers with -Wall turned on
+  indent_up();
+  indent(f_types_impl_) << "/* satisfy -Wall */" << endl <<
+               indent() << "THRIFT_UNUSED_VAR (object);" << endl;
+
+  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
+    t_type* t = get_true_type ((*m_iter)->get_type());
+    if (t->is_base_type()) {
+      // only have init's for base types
+      string dval = " = ";
+      if (t->is_enum()) {
+        dval += "(" + type_name (t) + ")";
+      }
+      t_const_value* cv = (*m_iter)->get_value();
+      if (cv != NULL) {
+        dval += constant_value ("", t, cv);
+      } else {
+        dval += t->is_string() ? "NULL" : "0";
+      }
+      indent(f_types_impl_) << "object->" << (*m_iter)->get_name() << dval << ";" << endl;
+    } else if (t->is_struct()) {
+      string name = (*m_iter)->get_name();
+      string type_name_uc = to_upper_case
+        (initial_caps_to_underscores((*m_iter)->get_type()->get_name()));
+      indent(f_types_impl_) << "object->" << name << " = g_object_new (" << this->nspace_uc << "TYPE_" << type_name_uc << ", NULL);" << endl;
+    } else if (t->is_xception()) {
+      string name = (*m_iter)->get_name();
+      indent(f_types_impl_) << "object->" << name << " = NULL;" << endl;
+    } else if (t->is_container()) {
+      string name = (*m_iter)->get_name();
+      string init_function;
+
+      if (t->is_map()) {
+        t_type *key = ((t_map *) t)->get_key_type();
+        t_type *value = ((t_map *) t)->get_val_type();
+        init_function = generate_new_hash_from_type (key, value);
+      } else if (t->is_set()) {
+        t_type *etype = ((t_set *) t)->get_elem_type();
+        init_function = generate_new_hash_from_type (etype, NULL);
+      } else if (t->is_list()) {
+        t_type *etype = ((t_list *) t)->get_elem_type();
+        init_function = generate_new_array_from_type (etype);
+      }
+
+      indent(f_types_impl_) << "object->" << name << " = " <<
+                                  init_function << endl;
+
+    }
+
+    /* if not required, initialize the __isset variable */
+    if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
+      indent(f_types_impl_) << "object->__isset_" << (*m_iter)->get_name() << " = FALSE;" << endl;
+    }
+  }
+
+  indent_down();
+  f_types_impl_ << "}" << endl <<
+  endl;
+
+  /* create the destructor */
+  f_types_impl_ <<
+    "static void " << endl <<
+    this->nspace_lc << name_u << "_finalize (GObject *object)" << endl <<
+    "{" << endl;
+  indent_up();
+
+  f_types_impl_ <<
+    indent() <<
+    this->nspace << name << " *tobject = " << this->nspace_uc <<
+    name_uc << " (object);" << endl << endl;
+
+  f_types_impl_ <<
+    indent() << "/* satisfy -Wall in case we don't use tobject */" << endl <<
+    indent() << "THRIFT_UNUSED_VAR (tobject);" << endl;
+
+  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
+    t_type* t = get_true_type ((*m_iter)->get_type());
+    if (t->is_container()) { 
+      string name = (*m_iter)->get_name();
+      if (t->is_map() || t->is_set()) {
+        f_types_impl_ << indent() << "if (tobject->" << name << " != NULL)" << endl;
+        f_types_impl_ << indent() << "{" << endl;
+	indent_up();
+	f_types_impl_ <<
+	indent() << "g_hash_table_destroy (tobject->" << name << ");" << endl;
+	f_types_impl_ << indent() << "tobject->" << name << " = NULL;" << endl;
+	indent_down();
+	f_types_impl_ << indent() << "}" << endl;
+      } else if (t->is_list()) {
+        t_type *etype = ((t_list *) t)->get_elem_type();
+        string destructor_function = "g_ptr_array_free";
+
+        if (etype->is_base_type()) {
+          t_base_type::t_base tbase = ((t_base_type *) etype)->get_base();
+          switch (tbase) {
+            case t_base_type::TYPE_VOID:
+              throw "compiler error: cannot determine array type";
+            case t_base_type::TYPE_BOOL:
+            case t_base_type::TYPE_BYTE:
+            case t_base_type::TYPE_I16:
+            case t_base_type::TYPE_I32:           
+            case t_base_type::TYPE_I64:
+            case t_base_type::TYPE_DOUBLE:
+              destructor_function = "g_array_free";
+              break;
+            case t_base_type::TYPE_STRING:
+              break;
+            default:
+              throw "compiler error: no array info for type";
+          }
+        }
+
+        f_types_impl_ << indent() << "if (tobject->" << name << " != NULL)" << endl;
+        f_types_impl_ << indent() << "{" << endl;
+        indent_up();
+        f_types_impl_ <<
+          indent() << destructor_function << " (tobject->" << name <<
+                       ", TRUE);" << endl;
+        f_types_impl_ << indent() << "tobject->" << name << " = NULL;" << endl;
+        indent_down();
+        f_types_impl_ << indent() << "}" << endl;
+      }
+    } else if (t->is_struct() || t->is_xception()) {
+      string name = (*m_iter)->get_name();
+      // TODO: g_clear_object needs glib >= 2.28
+      // f_types_impl_ << indent() << "g_clear_object (&(tobject->" << name << "));" << endl;
+      // does g_object_unref the trick?
+      f_types_impl_ << indent() << "if (tobject->" << name << " != NULL)" << endl;
+      f_types_impl_ << indent() << "{" << endl;
+      indent_up();
+      f_types_impl_ <<
+      indent() << "g_object_unref(tobject->" << name << ");" << endl;
+      f_types_impl_ << indent() << "tobject->" << name << " = NULL;" << endl;
+      indent_down();
+      f_types_impl_ << indent() << "}" << endl;
+    } else if (t->is_string()) {
+      string name = (*m_iter)->get_name();
+      f_types_impl_ << indent() << "if (tobject->" << name << " != NULL)" << endl;
+      f_types_impl_ << indent() << "{" << endl;
+      indent_up();
+      f_types_impl_ <<
+      indent() << "g_free (tobject->" << name << ");" << endl;
+      f_types_impl_ << indent() << "tobject->" << name << " = NULL;" << endl;
+      indent_down();
+      f_types_impl_ << indent() << "}" << endl;
+    }
+  }
+
+  indent_down();
+  f_types_impl_ <<
+    "}" << endl <<
+    endl;
+
+
+  f_types_impl_ <<
+    "static void " << endl <<
+    this->nspace_lc << name_u << "_class_init (ThriftStructClass * cls)" << endl <<
+    "{" << endl;
+  indent_up();
+
+  f_types_impl_ <<   
+    indent() << "GObjectClass *gobject_class = G_OBJECT_CLASS (cls);" << endl <<
+    endl <<
+    indent() << "gobject_class->finalize = " << this->nspace_lc << name_u << "_finalize;" << endl <<
+    indent() << "cls->read = " << this->nspace_lc << name_u << "_read;" << endl <<
+    indent() << "cls->write = " << this->nspace_lc << name_u << "_write;" << endl;
+
+  indent_down();
+  f_types_impl_ <<
+    "}" << endl <<
+    endl;
+
+
+  f_types_impl_ <<
+    "GType" << endl <<
+    this->nspace_lc << name_u << "_get_type (void)" << endl <<
+    "{" << endl <<
+    "  static GType type = 0;" << endl <<
+    endl <<
+    "  if (type == 0) " << endl <<
+    "  {" << endl <<
+    "    static const GTypeInfo type_info = " << endl <<
+    "    {" << endl <<
+    "      sizeof (" << this->nspace << name << "Class)," << endl <<
+    "      NULL, /* base_init */" << endl <<
+    "      NULL, /* base_finalize */" << endl <<
+    "      (GClassInitFunc) " << this->nspace_lc << name_u << "_class_init," << endl <<
+    "      NULL, /* class_finalize */" << endl <<
+    "      NULL, /* class_data */" << endl <<
+    "      sizeof (" << this->nspace << name << ")," << endl <<
+    "      0, /* n_preallocs */" << endl <<
+    "      (GInstanceInitFunc) " << this->nspace_lc << name_u << "_instance_init," << endl <<
+    "      NULL, /* value_table */" << endl <<
+    "    };" << endl <<
+    endl <<
+    "    type = g_type_register_static (THRIFT_TYPE_STRUCT, " << endl <<
+    "                                   \"" << this->nspace << name << "Type\"," << endl <<
+    "                                   &type_info, 0);" << endl <<
+    "  }" << endl <<
+    endl <<
+    "  return type;" << endl <<
+    "}" << endl <<
+    endl;
+}
+
+/**
+ * Generates functions to write Thrift structures to a stream.
+ */
+void t_rust_generator::generate_struct_writer (ofstream &out,
+                                                 t_struct *tstruct,
+                                                 string this_name,
+                                                 string this_get,
+                                                 bool is_function) {
+  string name = tstruct->get_name();
+  string name_u = initial_caps_to_underscores(name);
+  string name_uc = to_upper_case(name_u);
+
+  const vector<t_field *> &fields = tstruct->get_members();
+  vector <t_field *>::const_iterator f_iter;
+  int error_ret = 0;
+
+  if (is_function) {
+    error_ret = -1;
+    indent(out) <<
+      "static gint32" << endl <<
+      this->nspace_lc << name_u <<
+      "_write (ThriftStruct *object, ThriftProtocol *protocol, GError **error)" << endl;
+  }
+  indent(out) << "{" << endl;
+  indent_up();
+
+  out <<
+    indent() << "gint32 ret;" << endl <<
+    indent() << "gint32 xfer = 0;" << endl <<
+    endl;
+
+  indent(out) << this_get << endl;
+  // satisfy -Wall in the case of an empty struct
+  if (!this_get.empty()) {
+    indent(out) << "THRIFT_UNUSED_VAR (this_object);" << endl;
+  }
+
+  out <<
+    indent() << "if ((ret = thrift_protocol_write_struct_begin (protocol, \"" << name << "\", error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl;
+
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    if ((*f_iter)->get_req() == t_field::T_OPTIONAL) {
+      indent(out) << "if (this_object->__isset_" << (*f_iter)->get_name() << " == TRUE) {" << endl;
+      indent_up();
+    } 
+
+    out <<
+     indent() << "if ((ret = thrift_protocol_write_field_begin (protocol, " <<
+     "\"" << (*f_iter)->get_name() << "\", " <<
+     type_to_enum ((*f_iter)->get_type()) << ", " <<
+     (*f_iter)->get_key() << ", error)) < 0)" << endl <<
+     indent() << "  return " << error_ret << ";" << endl <<
+     indent() << "xfer += ret;" << endl;
+    generate_serialize_field (out, *f_iter, this_name, "", error_ret);
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_field_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl;
+
+    if ((*f_iter)->get_req() == t_field::T_OPTIONAL) {
+      indent_down();
+      indent(out) << "}" << endl;
+    }
+  }
+
+  // write the struct map
+  out <<
+    indent() << "if ((ret = thrift_protocol_write_field_stop (protocol, error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    indent() << "if ((ret = thrift_protocol_write_struct_end (protocol, error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    endl;
+
+  if (is_function) {
+    indent(out) << "return xfer;" << endl;
+  }
+
+  indent_down();
+  indent(out) <<
+    "}" << endl <<
+    endl;
+}
+
+/**
+ * Generates code to read Thrift structures from a stream.
+ */
+void t_rust_generator::generate_struct_reader(ofstream &out,
+                                                t_struct *tstruct,
+                                                string this_name,
+                                                string this_get,
+                                                bool is_function) {
+  string name = tstruct->get_name();
+  string name_u = initial_caps_to_underscores(name);
+  string name_uc = to_upper_case(name_u);
+  int error_ret = 0;
+  const vector<t_field *> &fields = tstruct->get_members();
+  vector <t_field *>::const_iterator f_iter;
+
+  if (is_function) {
+    error_ret = -1;
+    indent(out) <<
+      "/* reads a " << name_u << " object */" << endl <<
+      "static gint32" << endl <<
+      this->nspace_lc << name_u <<
+          "_read (ThriftStruct *object, ThriftProtocol *protocol, GError **error)" << endl;
+  }
+
+  indent(out) << "{" << endl;
+  indent_up();
+
+  // declare stack temp variables
+  out <<
+    indent() << "gint32 ret;" << endl <<
+    indent() << "gint32 xfer = 0;" << endl <<
+    indent() << "gchar *name = NULL;" << endl <<
+    indent() << "ThriftType ftype;" << endl <<
+    indent() << "gint16 fid;" << endl <<
+    indent() << "guint32 len = 0;" << endl <<
+    indent() << "gpointer data = NULL;" << endl <<
+    indent() << this_get << endl;
+
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    if ((*f_iter)->get_req() == t_field::T_REQUIRED) {
+      indent(out) << "gboolean isset_" << (*f_iter)->get_name() << " = FALSE;" << endl;
+    }
+  }
+
+  out << endl;
+
+  // satisfy -Wall in case we don't use some variables
+  out <<
+    indent() << "/* satisfy -Wall in case these aren't used */" << endl <<
+    indent() << "THRIFT_UNUSED_VAR (len);" << endl <<
+    indent() << "THRIFT_UNUSED_VAR (data);" << endl;
+
+  if (!this_get.empty()) {
+    out << indent() << "THRIFT_UNUSED_VAR (this_object);" << endl;
+  }
+  out << endl;
+
+  // read the beginning of the structure marker
+  out <<
+    indent() << "/* read the struct begin marker */" << endl <<
+    indent() << "if ((ret = thrift_protocol_read_struct_begin (protocol, &name, error)) < 0)" << endl <<
+    indent() << "{" << endl <<
+    indent() << "  if (name) g_free (name);" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "}" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    indent() << "if (name) g_free (name);" << endl <<
+    indent() << "name = NULL;" << endl <<
+    endl;
+
+  // read the struct fields
+  out <<
+    indent() << "/* read the struct fields */" << endl <<
+    indent() << "while (1)" << endl;
+  scope_up(out);
+
+  // read beginning field marker
+  out <<
+    indent() << "/* read the beginning of a field */" << endl <<
+    indent() << "if ((ret = thrift_protocol_read_field_begin (protocol, &name, &ftype, &fid, error)) < 0)" << endl <<
+    indent() << "{" << endl <<
+    indent() << "  if (name) g_free (name);" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "}" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    indent() << "if (name) g_free (name);" << endl <<
+    indent() << "name = NULL;" << endl <<
+    endl;
+
+  // check for field STOP marker
+  out <<
+    indent() << "/* break if we get a STOP field */" << endl <<
+    indent() << "if (ftype == T_STOP)" << endl <<
+    indent() << "{" << endl <<
+    indent() << "  break;" << endl <<
+    indent() << "}" << endl <<
+    endl;
+
+  // switch depending on the field type
+  indent(out) <<
+    "switch (fid)" << endl;
+
+  // start switch
+  scope_up(out);
+
+  // generate deserialization code for known types
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    indent(out) <<
+      "case " << (*f_iter)->get_key() << ":" << endl;
+    indent_up();
+    indent(out) <<
+      "if (ftype == " << type_to_enum ((*f_iter)->get_type()) << ")" << endl;
+    indent(out) <<
+      "{" << endl;
+
+
+    indent_up();
+    // generate deserialize field
+    generate_deserialize_field (out, *f_iter, this_name, "", error_ret, false);
+    indent_down();
+
+    out <<
+      indent() << "} else {" << endl <<
+      indent() << "  if ((ret = thrift_protocol_skip (protocol, ftype, error)) < 0)" << endl <<
+      indent() << "    return " << error_ret << ";" << endl <<
+      indent() << "  xfer += ret;" << endl <<
+      indent() << "}" << endl <<
+      indent() << "break;" << endl;
+    indent_down();
+  }
+
+  // create the default case
+  out <<
+    indent() << "default:" << endl <<
+    indent() << "  if ((ret = thrift_protocol_skip (protocol, ftype, error)) < 0)" << endl <<
+    indent() << "    return " << error_ret << ";" << endl <<
+    indent() << "  xfer += ret;" << endl <<
+    indent() << "  break;" << endl;
+
+  // end switch
+  scope_down(out);
+
+  // read field end marker
+  out <<
+    indent() << "if ((ret = thrift_protocol_read_field_end (protocol, error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl;
+
+  // end while loop
+  scope_down(out);
+  out << endl;
+
+  // read the end of the structure
+  out <<
+    indent() << "if ((ret = thrift_protocol_read_struct_end (protocol, error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    endl;
+
+  // if a required field is missing, throw an error
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    if ((*f_iter)->get_req() == t_field::T_REQUIRED) {
+      out <<
+        indent() << "if (!isset_" << (*f_iter)->get_name() << ")" << endl <<
+        indent() << "{" << endl <<
+        indent() << "  g_set_error (error, THRIFT_PROTOCOL_ERROR," << endl <<
+        indent() << "               THRIFT_PROTOCOL_ERROR_INVALID_DATA," << endl <<
+        indent() << "               \"missing field\");" << endl <<
+        indent() << "  return -1;" << endl <<
+        indent() << "}" << endl <<
+        endl;
+    }
+  }
+
+  if (is_function) {
+    indent(out) <<
+      "return xfer;" << endl;
+  }
+
+  // end the function/structure
+  indent_down();
+  indent(out) <<
+    "}" << endl <<
+    endl;
+}
+
+void t_rust_generator::generate_serialize_field(ofstream &out,
+                                                  t_field *tfield,
+                                                  string prefix,
+                                                  string suffix,
+                                                  int error_ret) {
+  t_type *type = get_true_type (tfield->get_type());
+  string name = prefix + tfield->get_name() + suffix;
+
+  if (type->is_void()) {
+    throw "CANNOT GENERATE SERIALIZE CODE FOR void TYPE: " + name;
+  }
+
+  if (type->is_struct() || type->is_xception()) {
+    generate_serialize_struct (out, (t_struct *) type, name, error_ret);
+  } else if (type->is_container()) {
+    generate_serialize_container (out, type, name, error_ret);
+  } else if (type->is_base_type() || type->is_enum()) {
+    indent(out) <<
+      "if ((ret = thrift_protocol_write_";
+
+    if (type->is_base_type()) {
+      t_base_type::t_base tbase = ((t_base_type *) type)->get_base();
+      switch (tbase) {
+        case t_base_type::TYPE_VOID:
+          throw "compiler error: cannot serialize void field in a struct: "
+                + name;
+          break;
+        case t_base_type::TYPE_BOOL:
+          out << "bool (protocol, " << name;
+          break;
+        case t_base_type::TYPE_BYTE:
+          out << "byte (protocol, " << name;
+          break;
+        case t_base_type::TYPE_I16:
+          out << "i16 (protocol, " << name;
+          break;
+        case t_base_type::TYPE_I32:
+          out << "i32 (protocol, " << name;
+          break;
+        case t_base_type::TYPE_I64:
+          out << "i64 (protocol, " << name;
+          break;
+        case t_base_type::TYPE_DOUBLE:
+          out << "double (protocol, " << name;
+          break;
+        case t_base_type::TYPE_STRING:
+          if (((t_base_type *) type)->is_binary()) {
+            out << "binary (protocol, ((GByteArray *) " << name <<
+                   ")->data, ((GByteArray *) " << name <<
+                   ")->len";
+          } else {
+            out << "string (protocol, " << name;
+          }
+          break;
+        default:
+          throw "compiler error: no C writer for base type "
+                + t_base_type::t_base_name (tbase) + name;
+      }
+    } else if (type->is_enum()) {
+      out << "i32 (protocol, (gint32) " << name;
+    }
+    out << ", error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl;
+  } else {
+    printf ("DO NOT KNOW HOW TO SERIALIZE FIELD '%s' TYPE '%s'\n",
+            name.c_str(), type_name (type).c_str());
+  }
+}
+
+void t_rust_generator::generate_serialize_struct(ofstream &out,
+                                                   t_struct *tstruct,
+                                                   string prefix,
+                                                   int error_ret) {
+  (void) tstruct;
+  out <<
+    indent() << "if ((ret = thrift_struct_write (THRIFT_STRUCT (" << prefix << "), protocol, error)) < 0)" << endl <<
+    indent() << "  return " << error_ret << ";" << endl <<
+    indent() << "xfer += ret;" << endl <<
+    endl;
+}
+
+void t_rust_generator::generate_serialize_container(ofstream &out,
+                                                      t_type *ttype,
+                                                      string prefix,
+                                                      int error_ret) {
+  scope_up(out);
+
+  if (ttype->is_map()) {
+    string length = "g_hash_table_size ((GHashTable *) " + prefix + ")";
+    t_type *tkey = ((t_map *) ttype)->get_key_type();
+    t_type *tval = ((t_map *) ttype)->get_val_type();
+    string tkey_name = type_name (tkey);
+    string tval_name = type_name (tval);
+    string tkey_ptr = tkey->is_string() || !tkey->is_base_type() ? "" : "*";
+    string tval_ptr = tval->is_string() || !tval->is_base_type() ? "" : "*";
+
+    /*
+     * Some ugliness here.  To maximize backwards compatibility, we
+     * avoid using GHashTableIter and instead get a GList of all keys,
+     * then copy it into a array on the stack, and free it.
+     * This is because we may exit early before we get a chance to free the
+     * GList.
+     */
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_map_begin (protocol, " <<
+                   type_to_enum (tkey) << ", " << type_to_enum (tval) <<
+                   ", (gint32) " << length << ", error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl <<
+      indent() << "GList *key_list = NULL, *iter = NULL;" << endl <<
+      indent() << tkey_name << tkey_ptr << " key;" << endl <<
+      indent() << tval_name << tval_ptr << " value;" << endl <<
+      indent() << "g_hash_table_foreach ((GHashTable *) " << prefix << 
+                   ", thrift_hash_table_get_keys, &key_list);" << endl <<
+      indent() << tkey_name << tkey_ptr <<
+                   " keys[g_list_length (key_list)];" << endl <<
+      indent() << "int i=0, key_count = g_list_length (key_list);" << endl <<
+      indent() <<
+        "for (iter = g_list_first (key_list); iter; iter = iter->next)" <<
+        endl <<
+      indent() << "{" << endl <<
+      indent() << "  keys[i++] = (" << tkey_name << tkey_ptr <<
+                   ") iter->data;" << endl <<
+      indent() << "}" << endl <<
+      indent() << "g_list_free (key_list);" << endl <<
+      endl <<
+      indent() << "for (i = 0; i < key_count; ++i)" << endl;
+
+    scope_up(out);
+    out <<
+      indent() << "key = keys[i];" << endl <<
+      indent() << "value = (" << tval_name << tval_ptr <<
+                   ") g_hash_table_lookup (((GHashTable *) " << prefix <<
+                   "), (gpointer) key);" << endl <<
+      endl;
+    generate_serialize_map_element (out, (t_map *) ttype, tkey_ptr + " key",
+                                    tval_ptr + " value", error_ret);
+    scope_down(out);
+
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_map_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl;
+  } else if (ttype->is_set()) {
+    string length = "g_hash_table_size ((GHashTable *) " + prefix + ")";
+    t_type *telem = ((t_set *) ttype)->get_elem_type();
+    string telem_name = type_name (telem);
+    string telem_ptr = telem->is_string() || !telem->is_base_type() ? "" : "*";
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_set_begin (protocol, " <<
+                   type_to_enum (telem) << ", (gint32) " << length <<
+                   ", error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      indent() << "GList *key_list = NULL, *iter = NULL;" << endl <<
+      indent() << telem_name << telem_ptr << " elem;" << endl <<
+      indent() << "gpointer value;" << endl <<
+      indent() << "THRIFT_UNUSED_VAR (value);" << endl <<
+      endl <<
+      indent() << "g_hash_table_foreach ((GHashTable *) " << prefix <<
+                   ", thrift_hash_table_get_keys, &key_list);" << endl <<
+      indent() << telem_name << telem_ptr << " keys[g_list_length (key_list)];" << endl <<
+      indent() << "int i=0, key_count = g_list_length (key_list);" << endl <<
+      indent() << "for (iter = g_list_first (key_list); iter; iter = iter->next)" << endl <<
+      indent() << "{" << endl <<
+      indent() << "  keys[i++] = (" << telem_name << telem_ptr << ") iter->data;" << endl <<
+      indent() << "}" << endl <<
+      indent() << "g_list_free (key_list);" << endl <<
+      endl <<
+      indent() << "for (i=0; i<key_count; ++i)" << endl;
+
+    scope_up(out);
+    out <<
+      indent() << "elem = keys[i];" << endl <<
+      indent() << "value = (gpointer) g_hash_table_lookup (((GHashTable *) " <<
+                   prefix << "), (gpointer) elem);" << endl <<
+      endl;
+    generate_serialize_set_element (out, (t_set *) ttype, telem_ptr + "elem",
+                                    error_ret);
+    scope_down(out);
+
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_set_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl;
+  } else if (ttype->is_list()) {
+    string length = prefix + "->len";
+    string i = tmp("i");
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_list_begin (protocol, " <<
+                   type_to_enum (((t_list *) ttype)->get_elem_type()) <<
+                   ", (gint32) " << length << ", error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      indent() << "guint " << i << ";" << endl <<
+      indent() << "for ("<< i << "=0; " << i << "<" << length << "; " << i <<
+                         "++)" << endl;
+
+    scope_up(out);
+    generate_serialize_list_element (out, (t_list *) ttype, prefix, i, error_ret);
+    scope_down(out);
+
+    out <<
+      indent() << "if ((ret = thrift_protocol_write_list_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl;
+  }
+
+  scope_down(out);
+}
+
+void t_rust_generator::generate_serialize_map_element(ofstream &out,
+                                                        t_map *tmap,
+                                                        string key,
+                                                        string value,
+                                                        int error_ret) {
+  t_field kfield (tmap->get_key_type(), key);
+  generate_serialize_field (out, &kfield, "", "", error_ret);
+
+  t_field vfield (tmap->get_val_type(), value);
+  generate_serialize_field (out, &vfield, "", "", error_ret);
+}
+
+void t_rust_generator::generate_serialize_set_element(ofstream &out,
+                                                        t_set *tset,
+                                                        string element,
+                                                        int error_ret) {
+  t_field efield (tset->get_elem_type(), element);
+  generate_serialize_field (out, &efield, "", "", error_ret);
+}
+
+void t_rust_generator::generate_serialize_list_element(ofstream &out,
+                                                         t_list *tlist,
+                                                         string list,
+                                                         string index,
+                                                         int error_ret) {
+  t_type *ttype = tlist->get_elem_type();
+
+  // cast to non-const
+  string cast = "";
+  string name = "g_ptr_array_index ((GPtrArray *) " + list + ", "
+                + index + ")";
+
+  if (ttype->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base(); 
+    switch (tbase) {
       case t_base_type::TYPE_VOID:
-      case t_base_type::TYPE_STRING:
+        throw "compiler error: cannot determine array type";
         break;
       case t_base_type::TYPE_BOOL:
-        result += " = false";
+        name = "g_array_index (" + list + ", gboolean, " + index + ")";
         break;
+      case t_base_type::TYPE_BYTE:
+        name = "g_array_index (" + list + ", gint8, " + index + ")";
+        break;
+      case t_base_type::TYPE_I16:
+        name = "g_array_index (" + list + ", gint16, " + index + ")";
+        break;
+      case t_base_type::TYPE_I32:
+        name = "g_array_index (" + list + ", gint32, " + index + ")";
+        break;
+      case t_base_type::TYPE_I64:
+        name = "g_array_index (" + list + ", gint64, " + index + ")";
+        break;
+      case t_base_type::TYPE_DOUBLE:
+        name = "g_array_index (" + list + ", gdouble, " + index + ")";
+        break;
+      case t_base_type::TYPE_STRING:
+        cast = "(gchar*)";
+        break;
+      default:
+        throw "compiler error: no array info for type";
+    }
+  } else if (ttype->is_map() || ttype->is_set()) {
+    cast = "(GHashTable*)";
+  } else if (ttype->is_list()) {
+    t_type *base = ((t_list *)ttype)->get_elem_type();
+    if (base->is_base_type()) {
+      switch (((t_base_type *) base)->get_base()) {
+        case t_base_type::TYPE_VOID:
+          throw "compiler error: cannot determine array type";
+          break;
+        case t_base_type::TYPE_BOOL:
+        case t_base_type::TYPE_BYTE:
+        case t_base_type::TYPE_I16:
+        case t_base_type::TYPE_I32:
+        case t_base_type::TYPE_I64:
+        case t_base_type::TYPE_DOUBLE:
+          cast = "(GArray*)";
+          break;
+        case t_base_type::TYPE_STRING:
+          cast = "(GPtrArray*)";
+          break;
+        default:
+          throw "Compiler error: no array info for type";
+      }
+    } else {
+      cast = "(GPtrArray*)";
+    }
+  }
+
+  t_field efield (ttype, "(" + cast + name + ")");
+  generate_serialize_field (out, &efield, "", "", error_ret);
+}
+
+/* deserializes a field of any type. */
+void t_rust_generator::generate_deserialize_field(ofstream &out,
+                                                    t_field *tfield,
+                                                    string prefix,
+                                                    string suffix,
+                                                    int error_ret,
+                                                    bool allocate) {
+  t_type *type = get_true_type (tfield->get_type());
+
+  if (type->is_void()) {
+    throw "CANNOT GENERATE DESERIALIZE CODE FOR void TYPE: " +
+      prefix + tfield->get_name();
+  }
+
+  string name = prefix + tfield->get_name() + suffix;
+
+  if (type->is_struct() || type->is_xception()) {
+    generate_deserialize_struct (out, (t_struct *) type, name, error_ret, allocate);
+  } else if (type->is_container()) {
+    generate_deserialize_container (out, type, name, error_ret);
+  } else if (type->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) type)->get_base();
+    if (tbase == t_base_type::TYPE_STRING) {
+      indent(out) << "if (" << name << " != NULL)" << endl <<
+        indent() << "{" << endl;
+      indent_up();
+      indent(out) << "g_free(" << name << ");" << endl <<
+        indent() << name << " = NULL;" << endl;
+      indent_down();
+      indent(out) << "}" << endl <<
+      endl;
+    }
+    indent(out) << "if ((ret = thrift_protocol_read_";
+
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot serialize void field in a struct: " + name;
+        break;
+      case t_base_type::TYPE_STRING:
+        if (((t_base_type *) type)->is_binary()) {
+          out << "binary (protocol, &data, &len";
+        } else {
+          out << "string (protocol, &" << name;
+        }
+        break;
+      case t_base_type::TYPE_BOOL:
+        out << "bool (protocol, &" << name;
+        break;
+      case t_base_type::TYPE_BYTE:
+        out << "byte (protocol, &" << name;
+        break;
+      case t_base_type::TYPE_I16:
+        out << "i16 (protocol, &" << name;
+        break;
+      case t_base_type::TYPE_I32:
+        out << "i32 (protocol, &" << name;
+        break;
+      case t_base_type::TYPE_I64:
+        out << "i64 (protocol, &" << name;
+        break;
+      case t_base_type::TYPE_DOUBLE:
+        out << "double (protocol, &" << name;
+        break;
+      default:
+        throw "compiler error: no C reader for base type "
+          + t_base_type::t_base_name (tbase) + name;
+    }
+    out << ", error)) < 0)" << endl;
+    out << indent() << "  return " << error_ret << ";" << endl <<
+           indent() << "xfer += ret;" << endl;
+
+    // load the byte array with the data
+    if (tbase == t_base_type::TYPE_STRING
+        && ((t_base_type *) type)->is_binary()) {
+      indent(out) << name << " = g_byte_array_new();" << endl;
+      indent(out) << "g_byte_array_append (" << name << ", (guint8 *) data, (guint) len);" << endl;
+      indent(out) << "g_free (data);" << endl;
+    }
+  } else if (type->is_enum()) {
+    string t = tmp ("ecast");
+    out <<
+      indent() << "gint32 " << t << ";" << endl <<
+      indent() << "if ((ret = thrift_protocol_read_i32 (protocol, &" << t << ", error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      indent() << name << " = (" << type_name (type) << ")" << t << ";" << endl;
+  } else {
+    printf ("DO NOT KNOW HOW TO DESERIALIZE FIELD '%s' TYPE '%s'\n",
+            tfield->get_name().c_str(), type_name (type).c_str());
+  }
+
+  // if the type is not required and this is a thrift struct (no prefix),
+  // set the isset variable.  if the type is required, then set the
+  // local variable indicating the value was set, so that we can do    // validation later.
+  if (tfield->get_req() != t_field::T_REQUIRED && prefix != "") {
+    indent(out) << prefix << "__isset_" << tfield->get_name() << suffix << " = TRUE;" << endl;
+  } else if (tfield->get_req() == t_field::T_REQUIRED && prefix != "") {
+    indent(out) << "isset_" << tfield->get_name() << " = TRUE;" << endl;
+  }
+}
+
+void t_rust_generator::generate_deserialize_struct(ofstream &out,
+                                                     t_struct *tstruct,
+                                                     string prefix,
+                                                     int error_ret,
+                                                     bool allocate) {
+  string name_uc = to_upper_case(initial_caps_to_underscores(tstruct->get_name()));
+  if (tstruct->is_xception()) {
+    out <<
+      indent() << "/* This struct is an exception */" << endl;
+    allocate = true;
+  }
+
+  if (allocate) {
+    out <<
+      indent() << "if ( " << prefix << " != NULL)" << endl <<
+      indent() << "{" << endl;
+    indent_up();
+    out <<
+      indent() << "g_object_unref (" << prefix << ");" << endl;
+    indent_down();
+    out <<
+      indent() << "}" << endl <<
+      indent() << prefix << " = g_object_new (" << this->nspace_uc << "TYPE_" << name_uc << ", NULL);" << endl;
+  }
+  out <<
+    indent() << "if ((ret = thrift_struct_read (THRIFT_STRUCT (" << prefix << "), protocol, error)) < 0)" << endl <<
+    indent() << "{" << endl;
+  indent_up();
+  if (allocate) {
+    indent(out) << "g_object_unref (" << prefix << ");" << endl;
+  }
+  out <<
+    indent() << "return " << error_ret << ";" << endl;
+  indent_down();
+  out <<
+    indent() << "}" << endl <<
+    indent() << "xfer += ret;" << endl;
+}
+
+void t_rust_generator::generate_deserialize_container (ofstream &out, t_type *ttype,
+                                               string prefix, int error_ret) {
+  scope_up(out);
+
+  if (ttype->is_map()) {
+    out <<
+      indent() << "guint32 size;" << endl <<
+      indent() << "ThriftType key_type;" << endl <<
+      indent() << "ThriftType value_type;" << endl <<
+      endl <<
+      indent() << "/* read the map begin marker */" << endl <<
+      indent() << "if ((ret = thrift_protocol_read_map_begin (protocol, &key_type, &value_type, &size, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl;
+
+    // iterate over map elements
+    out <<
+      indent() << "/* iterate through each of the map's fields */" << endl <<
+      indent() << "guint32 i;" << endl <<
+      indent() << "for (i = 0; i < size; i++)" << endl;
+    scope_up(out);
+    generate_deserialize_map_element (out, (t_map *) ttype, prefix, error_ret);
+    scope_down(out);
+    out << endl;
+  
+    // read map end
+    out <<
+      indent() << "/* read the map end marker */" << endl <<
+      indent() << "if ((ret = thrift_protocol_read_map_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl;
+  } else if (ttype->is_set()) {
+    out <<
+      indent() << "guint32 size;" << endl <<
+      indent() << "ThriftType element_type;" << endl <<
+      indent() << "if ((ret = thrift_protocol_read_set_begin (protocol, &element_type, &size, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl;
+
+    // iterate over the elements
+    out <<
+      indent() << "/* iterate through the set elements */" << endl <<
+      indent() << "guint32 i;" << endl <<
+      indent() << "for (i = 0; i < size; ++i)" << endl;
+
+    scope_up(out);
+    generate_deserialize_set_element (out, (t_set *) ttype, prefix, error_ret);
+    scope_down(out);
+
+    // read set end
+    out <<
+      indent() << "if ((ret = thrift_protocol_read_set_end (protocol, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl;
+  } else if (ttype->is_list()) {
+    out <<
+      indent() << "guint32 size;" << endl <<
+      indent() << "ThriftType element_type;" << endl <<
+      indent() << "if ((ret = thrift_protocol_read_list_begin (protocol, &element_type, &size, error)) < 0)" << endl <<
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl;
+
+    out <<
+      indent() << "/* iterate through list elements */" << endl <<
+      indent() << "guint32 i;" << endl <<
+      indent() << "for (i = 0; i < size; i++)" << endl;
+
+    scope_up(out);
+    generate_deserialize_list_element (out, (t_list *) ttype, prefix, "i",
+                                       error_ret);
+    scope_down(out);
+
+    out <<
+      indent() << "if ((ret = thrift_protocol_read_list_end (protocol, error)) < 0)" << endl << 
+      indent() << "  return " << error_ret << ";" << endl <<
+      indent() << "xfer += ret;" << endl <<
+      endl;
+  }
+
+  scope_down(out);
+}
+
+void t_rust_generator::declare_local_variable(ofstream &out, t_type *ttype, string &name) {
+  string tname = type_name (ttype);
+  string ptr = ttype->is_string() || !ttype->is_base_type() ? "" : "*";
+
+  if (ttype->is_map()) {
+    out <<
+    indent() << tname << ptr << " " << name << " = g_hash_table_new (NULL, NULL);" << endl;
+  } else if (ttype->is_enum()) {
+    out <<
+    indent() << tname << ptr << " " << name << ";" << endl;
+  } else {
+    out <<
+    indent() << tname << ptr << " " << name << (ptr != "" ? " = g_new (" + tname + ", 1)" : " = NULL") << ";" << endl;
+  }
+}
+
+
+void t_rust_generator::generate_deserialize_map_element(ofstream &out,
+                                                          t_map *tmap,
+                                                          string prefix,
+                                                          int error_ret) {
+  t_type *tkey = tmap->get_key_type();
+  t_type *tval = tmap->get_val_type();
+  string tkey_ptr = tkey->is_string() || !tkey->is_base_type() ? "" : "*";
+  string tval_ptr = tval->is_string() || !tval->is_base_type() ? "" : "*";
+  string keyname = tmp("key");
+  string valname = tmp("val");
+
+  declare_local_variable(out, tkey, keyname);
+  declare_local_variable(out, tval, valname);
+
+  // deserialize the fields of the map element
+  t_field fkey (tkey, tkey_ptr + keyname);
+  generate_deserialize_field (out, &fkey, "", "", error_ret);
+  t_field fval (tval, tval_ptr + valname);
+  generate_deserialize_field (out, &fval, "", "", error_ret);
+
+  indent(out) <<
+    "g_hash_table_insert ((GHashTable *)" << prefix << ", (gpointer) " << keyname << ", (gpointer) " << valname << ");" << endl;
+}
+
+void t_rust_generator::generate_deserialize_set_element(ofstream &out,
+                                                          t_set *tset,
+                                                          string prefix,
+                                                          int error_ret) {
+  t_type *telem = tset->get_elem_type();
+  string elem = tmp ("_elem");
+  string telem_ptr = telem->is_string() || !telem->is_base_type() ? "" : "*";
+
+  declare_local_variable(out, telem, elem);
+
+  t_field felem (telem, telem_ptr + elem);
+  generate_deserialize_field (out, &felem, "", "", error_ret);
+
+  indent(out) <<
+    "g_hash_table_insert ((GHashTable *) " << prefix << ", (gpointer) " <<
+                              elem << ", (gpointer) 1);" << endl;
+}
+
+void t_rust_generator::generate_deserialize_list_element(ofstream &out,
+                                                           t_list *tlist,
+                                                           string prefix,
+                                                           string index,
+                                                           int error_ret) {
+  (void) index;
+  t_type *ttype = tlist->get_elem_type();
+  string elem = tmp ("_elem");
+  string telem_ptr = ttype->is_string() || !ttype->is_base_type() ? "" : "*";
+
+  declare_local_variable(out, ttype, elem);
+
+  t_field felem (ttype, telem_ptr + elem);
+  generate_deserialize_field (out, &felem, "", "", error_ret);
+
+  indent(out);
+
+  if (ttype->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot determine array type";
+      case t_base_type::TYPE_STRING:
+        out << "g_ptr_array_add (" << prefix << ", " << elem << ");" << endl;
+        return;
+      case t_base_type::TYPE_BOOL:
       case t_base_type::TYPE_BYTE:
       case t_base_type::TYPE_I16:
       case t_base_type::TYPE_I32:
       case t_base_type::TYPE_I64:
-        result += " = 0";
-        break;
       case t_base_type::TYPE_DOUBLE:
-        result += " = (double)0";
-        break;
+        out << "g_array_append_vals (" << prefix << ", " << elem << ", 1);" << endl;
+        return;
       default:
-        throw "compiler error: no C++ initializer for base type " + t_base_type::t_base_name(tbase);
-      }
-    } else if (type->is_enum()) {
-      result += " = (" + type_name(type) + ")0";
+        throw "compiler error: no array info for type";
     }
   }
-  if (!reference) {
-    result += ";";
-  }
-  return result;
+  out << "g_ptr_array_add (" << prefix << ", " << elem << ");" << endl;
 }
 
-/**
- * Renders a function signature of the form 'type name(args)'
- *
- * @param tfunction Function definition
- * @return String of rendered function definition
- */
-string t_rust_generator::function_signature(t_function* tfunction,
-                                           string style,
-                                           string prefix,
-                                           bool name_params) {
-  t_type* ttype = tfunction->get_returntype();
-  t_struct* arglist = tfunction->get_arglist();
-  bool has_xceptions = !tfunction->get_xceptions()->get_members().empty();
-
-  if (style == "") {
-    if (is_complex_type(ttype)) {
-      return
-        "void " + prefix + tfunction->get_name() +
-        "(" + type_name(ttype) + (name_params ? "& _return" : "& /* _return */") +
-        argument_list(arglist, name_params, true) + ")";
-    } else {
-      return
-        type_name(ttype) + " " + prefix + tfunction->get_name() +
-        "(" + argument_list(arglist, name_params) + ")";
-    }
-  } else if (style.substr(0,3) == "Cob") {
-    string cob_type;
-    string exn_cob;
-    if (style == "CobCl") {
-      cob_type = "(" + service_name_ + "CobClient";
-      if (gen_templates_) {
-        cob_type += "T<Protocol_>";
-      }
-      cob_type += "* client)";
-    } else if (style =="CobSv") {
-      cob_type = (ttype->is_void()
-                  ? "()"
-                  : ("(" + type_name(ttype) + " const& _return)"));
-      if (has_xceptions) {
-        exn_cob = ", tcxx::function<void(::apache::thrift::TDelayedException* _throw)> /* exn_cob */";
-      }
-    } else {
-      throw "UNKNOWN STYLE";
-    }
-
-    return
-      "void " + prefix + tfunction->get_name() +
-      "(tcxx::function<void" + cob_type + "> cob" + exn_cob +
-      argument_list(arglist, name_params, true) + ")";
-  } else {
-    throw "UNKNOWN STYLE";
-  }
-}
-
-/**
- * Renders a field list
- *
- * @param tstruct The struct definition
- * @return Comma sepearated list of all field names in that struct
- */
-string t_rust_generator::argument_list(t_struct* tstruct, bool name_params, bool start_comma) {
-  string result = "";
-
-  const vector<t_field*>& fields = tstruct->get_members();
-  vector<t_field*>::const_iterator f_iter;
-  bool first = !start_comma;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    if (first) {
-      first = false;
-    } else {
-      result += ", ";
-    }
-    result += type_name((*f_iter)->get_type(), false, true) + " " +
-      (name_params ? (*f_iter)->get_name() : "/* " + (*f_iter)->get_name() + " */");
-  }
-  return result;
-}
-
-/**
- * Converts the parse type to a C++ enum string for the given type.
- *
- * @param type Thrift Type
- * @return String of C++ code to definition of that type constant
- */
-string t_rust_generator::type_to_enum(t_type* type) {
-  type = get_true_type(type);
-
-  if (type->is_base_type()) {
-    t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
-    switch (tbase) {
-    case t_base_type::TYPE_VOID:
-      throw "NO T_VOID CONSTRUCT";
-    case t_base_type::TYPE_STRING:
-      return "::apache::thrift::protocol::T_STRING";
-    case t_base_type::TYPE_BOOL:
-      return "::apache::thrift::protocol::T_BOOL";
-    case t_base_type::TYPE_BYTE:
-      return "::apache::thrift::protocol::T_BYTE";
-    case t_base_type::TYPE_I16:
-      return "::apache::thrift::protocol::T_I16";
-    case t_base_type::TYPE_I32:
-      return "::apache::thrift::protocol::T_I32";
-    case t_base_type::TYPE_I64:
-      return "::apache::thrift::protocol::T_I64";
-    case t_base_type::TYPE_DOUBLE:
-      return "::apache::thrift::protocol::T_DOUBLE";
-    }
-  } else if (type->is_enum()) {
-    return "::apache::thrift::protocol::T_I32";
-  } else if (type->is_struct()) {
-    return "::apache::thrift::protocol::T_STRUCT";
-  } else if (type->is_xception()) {
-    return "::apache::thrift::protocol::T_STRUCT";
-  } else if (type->is_map()) {
-    return "::apache::thrift::protocol::T_MAP";
-  } else if (type->is_set()) {
-    return "::apache::thrift::protocol::T_SET";
-  } else if (type->is_list()) {
-    return "::apache::thrift::protocol::T_LIST";
-  }
-
-  throw "INVALID TYPE IN type_to_enum: " + type->get_name();
-}
-
-/**
- * Returns the symbol name of the local reflection of a type.
- */
-string t_rust_generator::local_reflection_name(const char* prefix, t_type* ttype, bool external) {
-  ttype = get_true_type(ttype);
-
-  // We have to use the program name as part of the identifier because
-  // if two thrift "programs" are compiled into one actual program
-  // you would get a symbol collision if they both defined list<i32>.
-  // trlo = Thrift Reflection LOcal.
-  string prog;
-  string name;
-  string nspace;
-
-  // TODO(dreiss): Would it be better to pregenerate the base types
-  //               and put them in Thrift.{h,cpp} ?
+string t_rust_generator::generate_free_func_from_type (t_type * ttype) {
+  if (ttype == NULL)
+    return "NULL";
 
   if (ttype->is_base_type()) {
-    prog = program_->get_name();
-    name = ttype->get_ascii_fingerprint();
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot determine hash type";
+        break;
+      case t_base_type::TYPE_BOOL:
+      case t_base_type::TYPE_BYTE:
+      case t_base_type::TYPE_I16:
+      case t_base_type::TYPE_I32:
+      case t_base_type::TYPE_I64:
+      case t_base_type::TYPE_DOUBLE:
+        return "NULL";
+      case t_base_type::TYPE_STRING:
+        return "g_free";
+      default:
+        throw "compiler error: no hash table info for type";
+    }
   } else if (ttype->is_enum()) {
-    assert(ttype->get_program() != NULL);
-    prog = ttype->get_program()->get_name();
-    name = ttype->get_ascii_fingerprint();
-  } else if (ttype->is_container()) {
-    prog = program_->get_name();
-    name = ttype->get_ascii_fingerprint();
+    return "NULL";
+  } else if (ttype->is_map() || ttype->is_set()) {
+    return "(GDestroyNotify) g_hash_table_destroy";
+  } else if (ttype->is_struct()) {
+    return "g_object_unref";
+  } else if (ttype->is_list()) {
+    t_type *etype = ((t_list *) ttype)->get_elem_type();
+    if (etype->is_base_type()) {
+      t_base_type::t_base tbase = ((t_base_type *) etype)->get_base();
+      switch (tbase) {
+        case t_base_type::TYPE_VOID:
+          throw "compiler error: cannot determine array type";
+          break;
+        case t_base_type::TYPE_BOOL:
+        case t_base_type::TYPE_BYTE:
+        case t_base_type::TYPE_I16:
+        case t_base_type::TYPE_I32:
+        case t_base_type::TYPE_I64:
+        case t_base_type::TYPE_DOUBLE:
+          return "(GDestroyNotify) g_array_unref";
+        case t_base_type::TYPE_STRING:
+          return "(GDestroyNotify) g_ptr_array_unref";
+        default:
+          throw "compiler error: no array info for type";
+      }
+    } else if (etype->is_container() || etype->is_struct()) {
+      return "(GDestroyNotify) g_ptr_array_unref";;
+    } else if (etype->is_enum()) {
+      return "(GDestroyNotify) g_array_unref";
+    }
+    printf("Type not expected inside the array: %s\n", etype->get_name().c_str());
+    throw "Type not expected inside array" ;
+  } else if (ttype->is_typedef()) {
+    return generate_free_func_from_type(((t_typedef *) ttype)->get_type());
+  }
+  printf("Type not expected: %s\n", ttype->get_name().c_str());
+  throw "Type not expected";
+}
+
+string t_rust_generator::generate_hash_func_from_type (t_type * ttype) {
+  if (ttype == NULL)
+    return "NULL";
+
+  if (ttype->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot determine hash type";
+        break;
+      case t_base_type::TYPE_BOOL:
+      case t_base_type::TYPE_BYTE:
+      case t_base_type::TYPE_I16:
+      case t_base_type::TYPE_I32:
+        return "g_int_hash";
+      case t_base_type::TYPE_I64:
+        return "g_int64_hash";
+      case t_base_type::TYPE_DOUBLE:
+        return "g_double_hash";
+      case t_base_type::TYPE_STRING:
+        return "g_str_hash";
+      default:
+        throw "compiler error: no hash table info for type";
+    }
+  } else if (ttype->is_enum()) {
+    return "g_direct_hash";
+  } else if (ttype->is_container() || ttype->is_struct()) {
+    return "g_direct_hash";
+  } else if (ttype->is_typedef()) {
+    return generate_hash_func_from_type(((t_typedef *) ttype)->get_type());
+  }
+  printf("Type not expected: %s\n", ttype->get_name().c_str());
+  throw "Type not expected";
+}
+
+string t_rust_generator::generate_cmp_func_from_type (t_type * ttype) {
+  if (ttype == NULL)
+    return "NULL";
+
+  if (ttype->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot determine hash type";
+        break;
+      case t_base_type::TYPE_BOOL:
+      case t_base_type::TYPE_BYTE:
+      case t_base_type::TYPE_I16:
+      case t_base_type::TYPE_I32:
+        return "g_int_equal";
+      case t_base_type::TYPE_I64:
+        return "g_int64_equal";
+      case t_base_type::TYPE_DOUBLE:
+        return "g_double_equal";
+      case t_base_type::TYPE_STRING:
+        return "g_str_equal";
+      default:
+        throw "compiler error: no hash table info for type";
+    }
+  } else if (ttype->is_enum()) {
+    return "NULL";
+  } else if (ttype->is_container() || ttype->is_struct()) {
+    return "g_direct_equal";
+  } else if (ttype->is_typedef()) {
+    return generate_cmp_func_from_type(((t_typedef *) ttype)->get_type());
+  }
+  printf("Type not expected: %s\n", ttype->get_name().c_str());
+  throw "Type not expected";
+}
+
+string t_rust_generator::generate_new_hash_from_type (t_type * key, t_type *value) {
+  string hash_func = generate_hash_func_from_type(key);
+  string cmp_func = generate_cmp_func_from_type(key);
+  string key_free_func = generate_free_func_from_type(key);
+  string value_free_func = generate_free_func_from_type(value);
+
+  return "g_hash_table_new_full (" + hash_func + ", " + cmp_func + ", " +
+                              key_free_func + ", " + value_free_func + ");";
+}
+
+string t_rust_generator::generate_new_array_from_type(t_type * ttype) {
+  if (ttype->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type *) ttype)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot determine array type";
+        break;
+      case t_base_type::TYPE_BOOL:
+        return "g_array_new (0, 1, sizeof (gboolean));";
+      case t_base_type::TYPE_BYTE:
+        return "g_array_new (0, 1, sizeof (gint8));";
+      case t_base_type::TYPE_I16:
+        return "g_array_new (0, 1, sizeof (gint16));";
+      case t_base_type::TYPE_I32:
+        return "g_array_new (0, 1, sizeof (gint32));";
+      case t_base_type::TYPE_I64:
+        return "g_array_new (0, 1, sizeof (gint64));";
+      case t_base_type::TYPE_DOUBLE:
+        return "g_array_new (0, 1, sizeof (gdouble));";
+      case t_base_type::TYPE_STRING:
+        return "g_ptr_array_new_with_free_func (g_free);";
+      default:
+        throw "compiler error: no array info for type";
+    }
+  } else if (ttype->is_enum()) {
+    return "g_array_new (0, 1, sizeof (gint32));";
   } else {
-    assert(ttype->is_struct() || ttype->is_xception());
-    assert(ttype->get_program() != NULL);
-    prog = ttype->get_program()->get_name();
-    name = ttype->get_ascii_fingerprint();
+    string free_func = generate_free_func_from_type(ttype);
+    return "g_ptr_array_new_with_free_func (" + free_func + ");";
   }
 
-  if (external &&
-      ttype->get_program() != NULL &&
-      ttype->get_program() != program_) {
-    nspace = namespace_prefix(ttype->get_program()->get_namespace("rust"));
-  }
-
-  return nspace + "trlo_" + prefix + "_" + prog + "_" + name;
-}
-
-string t_rust_generator::get_include_prefix(const t_program& program) const {
-  string include_prefix = program.get_include_prefix();
-  if (!use_include_prefix_ ||
-      (include_prefix.size() > 0 && include_prefix[0] == '/')) {
-    // if flag is turned off or this is absolute path, return empty prefix
-    return "";
-  }
-
-  string::size_type last_slash = string::npos;
-  if ((last_slash = include_prefix.rfind("/")) != string::npos) {
-    return include_prefix.substr(0, last_slash) +
-      (get_program()->is_out_path_absolute() ? "/" : "/" + out_dir_base_ + "/");
-
-  }
-
-  return "";
+  return "g_ptr_array_new();";
 }
 
 
-THRIFT_REGISTER_GENERATOR(rust, "Rust",
-""
-)
+// borrow these from c_glib for now.
+#if 0
+/***************************************
+ * UTILITY FUNCTIONS                   *
+ ***************************************/
 
+/**
+ * Upper case a string.  Wraps boost's string utility.
+ */
+string to_upper_case(string name) {
+  string s (name);
+  std::transform (s.begin(), s.end(), s.begin(), ::toupper);
+  return s;
+//  return boost::to_upper_copy (name);
+}
+
+/**
+ * Lower case a string.  Wraps boost's string utility.
+ */
+string to_lower_case(string name) {
+  string s (name);
+  std::transform (s.begin(), s.end(), s.begin(), ::tolower);
+  return s;
+//  return boost::to_lower_copy (name);
+}
+
+string initial_caps_to_underscores(string name) {
+  string ret;
+  const char *tmp = name.c_str();
+  int pos = 0;
+
+  /* the first character isn't underscored if uppercase, just lowercased */
+  ret += tolower (tmp[pos]);
+  pos++;
+  for (unsigned int i = pos; i < name.length(); i++) {
+    char lc = tolower (tmp[i]); 
+    if (lc != tmp[i]) {
+      ret += '_';
+    }
+    ret += lc;
+  }
+
+  return ret;
+}
+#endif
+
+// } // end rust_generator namespace
+
+/* register this generator with the main program */
+THRIFT_REGISTER_GENERATOR(rust, "Rust", "")

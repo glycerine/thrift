@@ -17,40 +17,21 @@
  * under the License.
  */
 
-#ifndef T_CONTAINER_H
-#define T_CONTAINER_H
+#ifndef _THRIFT_H
+#define _THRIFT_H
 
-#include "t_type.h"
-
-class t_container : public t_type {
- public:
-  t_container() :
-    cpp_name_(),
-    has_cpp_name_(false) {}
-
-  virtual ~t_container() {}
-
-  void set_cpp_name(std::string cpp_name) {
-    cpp_name_ = cpp_name;
-    has_cpp_name_ = true;
-  }
-
-  bool has_cpp_name() {
-    return has_cpp_name_;
-  }
-
-  std::string get_cpp_name() {
-    return cpp_name_;
-  }
-
-  bool is_container() const {
-    return true;
-  }
-
- private:
-  std::string cpp_name_;
-  bool has_cpp_name_;
-
-};
-
+#ifdef HAVE_CONFIG_H
+#include "config.h"
 #endif
+
+#include <glib.h>
+
+/* this macro is called to satisfy -Wall hardcore compilation */
+#ifndef THRIFT_UNUSED_VAR
+# define THRIFT_UNUSED_VAR(x) ((void) x)
+#endif
+
+void thrift_hash_table_get_keys (gpointer key, gpointer value,
+                                 gpointer user_data);
+
+#endif // #ifndef _THRIFT_THRIFT_H

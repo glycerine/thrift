@@ -17,40 +17,16 @@
  * under the License.
  */
 
-#ifndef T_CONTAINER_H
-#define T_CONTAINER_H
+#include <thrift/rust/thrift.h>
 
-#include "t_type.h"
+/**
+ * GHashTable callback to add keys to a GList.
+ */
+void
+thrift_hash_table_get_keys (gpointer key, gpointer value, gpointer user_data)
+{
+  THRIFT_UNUSED_VAR (value);
+  GList **list = (GList **) user_data;
+  *list = g_list_append (*list, key);
+}
 
-class t_container : public t_type {
- public:
-  t_container() :
-    cpp_name_(),
-    has_cpp_name_(false) {}
-
-  virtual ~t_container() {}
-
-  void set_cpp_name(std::string cpp_name) {
-    cpp_name_ = cpp_name;
-    has_cpp_name_ = true;
-  }
-
-  bool has_cpp_name() {
-    return has_cpp_name_;
-  }
-
-  std::string get_cpp_name() {
-    return cpp_name_;
-  }
-
-  bool is_container() const {
-    return true;
-  }
-
- private:
-  std::string cpp_name_;
-  bool has_cpp_name_;
-
-};
-
-#endif

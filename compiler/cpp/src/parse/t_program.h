@@ -323,14 +323,6 @@ class t_program : public t_doc {
     return cpp_includes_;
   }
 
-  void add_rust_include(std::string path) {
-    rust_includes_.push_back(path);
-  }
-
-  const std::vector<std::string>& get_rust_includes() {
-    return rust_includes_;
-  }
-
   void add_c_include(std::string path) {
     c_includes_.push_back(path);
   }
@@ -382,9 +374,6 @@ class t_program : public t_doc {
 
   // C extra includes
   std::vector<std::string> c_includes_;
-
-  // Rust extra includes
-  std::vector<std::string> rust_includes_;
 
 };
 

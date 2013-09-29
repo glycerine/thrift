@@ -17,40 +17,28 @@
  * under the License.
  */
 
-#ifndef T_CONTAINER_H
-#define T_CONTAINER_H
+#include <thrift/rust/thrift.h>
+#include <thrift/rust/processor/thrift_processor.h>
 
-#include "t_type.h"
+G_DEFINE_ABSTRACT_TYPE(ThriftProcessor, thrift_processor, G_TYPE_OBJECT)
 
-class t_container : public t_type {
- public:
-  t_container() :
-    cpp_name_(),
-    has_cpp_name_(false) {}
+gboolean
+thrift_processor_process (ThriftProcessor *processor, ThriftProtocol *in,
+                          ThriftProtocol *out)
+{
+  return THRIFT_PROCESSOR_GET_CLASS (processor)->process (processor, in, out);
+}
 
-  virtual ~t_container() {}
+/* class initializer for ThriftProcessor */
+static void
+thrift_processor_class_init (ThriftProcessorClass *cls)
+{
+  /* set these as virtual methods to be implemented by a subclass */
+  cls->process = thrift_processor_process;
+}
 
-  void set_cpp_name(std::string cpp_name) {
-    cpp_name_ = cpp_name;
-    has_cpp_name_ = true;
-  }
-
-  bool has_cpp_name() {
-    return has_cpp_name_;
-  }
-
-  std::string get_cpp_name() {
-    return cpp_name_;
-  }
-
-  bool is_container() const {
-    return true;
-  }
-
- private:
-  std::string cpp_name_;
-  bool has_cpp_name_;
-
-};
-
-#endif
+static void
+thrift_processor_init (ThriftProcessor *processor)
+{
+  THRIFT_UNUSED_VAR (processor);
+}
