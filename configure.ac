@@ -177,6 +177,24 @@ if test "$with_erlang" = "yes";  then
 fi
 AM_CONDITIONAL(WITH_ERLANG, [test "$have_erlang" = "yes"])
 
+
+AX_THRIFT_LIB(rust, [Rust], yes)
+if test "$with_rust" = "yes";  then
+  AC_RUST_PATH_RUST
+  AC_RUST_PATH_RUSTC
+  if test -n "$RUSTC" ; then
+    AC_RUST_SUBST_LIB_DIR
+    # Install into the detected Rust directory instead of $libdir/rust/lib
+    RUST_INSTALL_LIB_DIR="$RUST_LIB_DIR"
+    AC_RUST_SUBST_INSTALL_LIB_SUBDIR(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
+  fi
+  if test -n "$RUST" -a -n "$RUSTC" ; then
+    have_rust="yes"
+  fi
+fi
+AM_CONDITIONAL(WITH_RUST, [test "$have_rust" = "yes"])
+
+
 AX_THRIFT_LIB(python, [Python], yes)
 if test "$with_python" = "yes";  then
   AM_PATH_PYTHON(2.4,, :)
@@ -617,6 +635,7 @@ echo "Building Haskell Library ..... : $have_haskell"
 echo "Building Perl Library ........ : $have_perl"
 echo "Building PHP Library ......... : $have_php"
 echo "Building Erlang Library ...... : $have_erlang"
+echo "Building Rust Library ...... : $have_erlang"
 echo "Building Go Library .......... : $have_go"
 echo "Building D Library ........... : $have_d"
 
