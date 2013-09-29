@@ -1,0 +1,6 @@
+#!/bin/bash
+cd /usr/cn/thrift/github/thrift
+make
+make install
+cd compiler/cpp/src/generate/
+/usr/cn/thrift/github/install/bin/thrift -gen rust micro.thrift
